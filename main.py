@@ -249,11 +249,11 @@ def process_input():
 
     # 질문 유형별 분기
     if q_type == "web_search":
-        answer = handle_web_search(ui, st.session_state.context, hs_manager)
+        answer = "\n\n 웹검색 실시 \n\n" + handle_web_search(ui, st.session_state.context, hs_manager)
     elif q_type == "hs_classification":
-        answer = handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
+        answer = "\n\n HS 분류사례 검색 실시 \n\n" + handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
     elif q_type == "hs_manual":
-        answer = handle_hs_manual(ui, st.session_state.context, hs_manager)
+        answer = "\n\n HS 해설서 분석 \n\n" + handle_hs_manual(ui, st.session_state.context, hs_manager)
     else:
         # 예외 처리: 기본 HS 분류
         answer = handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
