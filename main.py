@@ -1,12 +1,9 @@
 import streamlit as st
 import google.generativeai as genai
-import json
 import os
-import re
 from dotenv import load_dotenv
-from utils import HSDataManager
-from hs_search import lookup_hscode
-import requests
+from utils import HSDataManager, extract_hs_codes, clean_text, web_search_answer, classify_question
+from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -56,13 +53,6 @@ st.markdown("""
 def get_hs_manager():
     return HSDataManager()
 
-# HTML 태그 제거 및 텍스트 정제 함수
-def clean_text(text):
-    # HTML 태그 제거 (더 엄격한 정규식 패턴 사용)
-    text = re.sub(r'<[^>]+>', '', text)  # 모든 HTML 태그 제거
-    text = re.sub(r'\s*</div>\s*$', '', text)  # 끝에 있는 </div> 태그 제거
-    return text.strip()
-
 # 세션 상태 초기화
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []  # 채팅 기록 저장
@@ -86,158 +76,6 @@ if 'context' not in st.session_state:
 지금까지의 대화:
 """
 
-import re
-
-# 모듈 상단에서 한 번만 컴파일
-HS_PATTERN = re.compile(
-    r'\b(?:HS)?\s*\d{4}(?:[.-]\d{2}(?:[.-]\d{2}(?:[.-]\d{2})?)?)?\b',
-    flags=re.IGNORECASE
-)
-
-def extract_hs_codes(text):
-    """여러 HS 코드를 추출하고, 중복 제거 및 숫자만 남겨 표준화"""
-    matches = HS_PATTERN.findall(text)
-    hs_codes = []
-    for raw in matches:
-        # 숫자만 남기기
-        code = re.sub(r'\D', '', raw)
-        if code and code not in hs_codes:
-            hs_codes.append(code)
-    return hs_codes
-
-import json
-
-def extract_and_store_text(json_file):
-    """JSON 파일에서 head1과 text를 추출하여 변수에 저장"""
-    try:
-        # JSON 파일 읽기
-        with open(json_file, 'r', encoding='utf-8') as file:
-            data = json.load(file)
-        
-        # 데이터를 변수에 저장
-        extracted_data = []
-        for item in data:
-            head1 = item.get('head1', '')
-            text = item.get('text', '')
-            if head1 or text:
-                extracted_data.append(f"{head1}\n{text}")
-        
-        # print("데이터가 변수에 저장되었습니다.")
-        return extracted_data
-    except Exception as e:
-        print(f"오류 발생: {e}")
-        return []
-
-# 함수 실행 및 데이터 저장
-general_explanation = extract_and_store_text('knowledge/통칙_grouped.json')
-
-
-def get_hs_explanations(hs_codes):
-    """여러 HS 코드에 대한 해설을 취합하는 함수"""
-    all_explanations = ""
-    for hs_code in hs_codes:
-        explanation, type_explanation, number_explanation = lookup_hscode(hs_code, 'knowledge/grouped_11_end.json')
-
-        if explanation and type_explanation and number_explanation:
-            all_explanations += f"\n\nHS 코드 {hs_code}에 대한 해설:\n"
-            all_explanations += f"해설서 통칙:\n{general_explanation}\n\n"
-            all_explanations += f"부 해설:\n{explanation['text']}\n\n"
-            all_explanations += f"류 해설:\n{type_explanation['text']}\n\n"
-            all_explanations += f"호 해설:\n{number_explanation['text']}\n"
-    return all_explanations
-
-# Serper API를 이용한 웹 검색 답변 함수
-def web_search_answer(query, num_results=3):
-    """
-    사용자의 질문에 대해 Serper API를 이용해 웹 검색 결과를 기반으로 답변을 생성합니다.
-    (Serper API 키 필요, https://serper.dev)
-    """
-    SERPER_API_KEY = os.getenv('SERPER_API_KEY')
-    if not SERPER_API_KEY:
-        return "웹 검색 API 키가 설정되어 있지 않습니다."
-    endpoint = "https://google.serper.dev/search"
-    headers = {
-        "X-API-KEY": SERPER_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "q": query,
-        "num": num_results
-    }
-    try:
-        response = requests.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
-        results = response.json().get("organic", [])
-        if not results:
-            return "웹 검색 결과를 찾을 수 없습니다."
-        answer = "웹 검색 결과 요약:\n"
-        for idx, item in enumerate(results, 1):
-            title = re.sub(r'<.*?>', '', item.get("title", ""))
-            snippet = re.sub(r'<.*?>', '', item.get("snippet", ""))
-            url = item.get("link", "")
-            answer += f"{idx}. [{title}]({url}): {snippet}\n"
-        return answer
-    except Exception as e:
-        return f"웹 검색 중 오류가 발생했습니다: {e}"
-
-# 질문 유형 분류 함수 (LLM 기반)
-def classify_question(user_input):
-    """
-    LLM(Gemini)을 활용하여 사용자의 질문을 아래 세 가지 유형 중 하나로 분류합니다.
-    - 'web_search': 물품 개요, 용도, 기술개발, 무역동향, 산업동향 등
-    - 'hs_classification': HS 코드, 품목분류, 관세 등
-    - 'hs_manual': HS 해설서, 규정, 판례 등 심층 분석
-    """
-    system_prompt = """
-아래는 HS 품목분류 전문가를 위한 질문 유형 분류 기준입니다.
-
-질문 유형:
-1. "web_search" : "뉴스", "최근", "동향", "해외", "산업, 기술, 무역동향" 등 일반 정보 탐색이 필요한 경우.
-2. "hs_classification": HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. "hs_manual": HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
-
-아래 사용자 질문을 읽고, 반드시 위 세 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
-질문: """ + user_input + """\n답변:"""
-
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    response = model.generate_content(system_prompt)
-    answer = response.text.strip().lower()
-    # 결과가 정확히 세 가지 중 하나인지 확인
-    if answer in ["web_search", "hs_classification", "hs_manual"]:
-        return answer
-    # 예외 처리: 분류 실패 시 기본값
-    return "hs_classification"
-
-# 사용자 입력 처리 콜백 함수 (수정)
-
-def handle_web_search(user_input, context, hs_manager):
-    relevant = hs_manager.get_relevant_context(user_input)
-    search_result = web_search_answer(user_input)
-    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n{search_result}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
-
-def handle_hs_classification_cases(user_input, context, hs_manager):
-    relevant = hs_manager.get_relevant_context(user_input)
-    # hs_codes = extract_hs_codes(user_input)
-    # explanations = get_hs_explanations(hs_codes) if hs_codes else ""
-    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
-
-def handle_hs_manual(user_input, context, hs_manager):
-    # 예: HS 해설서 분석 전용 컨텍스트 추가
-    manual_context = context + "\n(심층 해설서 분석 모드)"
-    # relevant = hs_manager.get_relevant_context(user_input)
-    hs_codes = extract_hs_codes(user_input)
-    explanations = get_hs_explanations(hs_codes) if hs_codes else ""
-    prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
-
 def process_input():
     ui = st.session_state.user_input
     if not ui: 
@@ -249,11 +87,11 @@ def process_input():
 
     # 질문 유형별 분기
     if q_type == "web_search":
-        answer = "\n\n 웹검색 실시 \n\n" + handle_web_search(ui, st.session_state.context, hs_manager)
+        answer = "\n\n +++ 웹검색 실시 +++\n\n" + handle_web_search(ui, st.session_state.context, hs_manager)
     elif q_type == "hs_classification":
-        answer = "\n\n HS 분류사례 검색 실시 \n\n" + handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
+        answer = "\n\n +++ HS 분류사례 검색 실시 +++ \n\n" + handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
     elif q_type == "hs_manual":
-        answer = "\n\n HS 해설서 분석 \n\n" + handle_hs_manual(ui, st.session_state.context, hs_manager)
+        answer = "\n\n +++ HS 해설서 분석 실시 +++ \n\n" + handle_hs_manual(ui, st.session_state.context, hs_manager)
     else:
         # 예외 처리: 기본 HS 분류
         answer = handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
