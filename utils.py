@@ -27,6 +27,7 @@ class HSDataManager:
         - HS분류사례_part1~10.json 파일 로드
         - HS위원회.json, HS협의회.json 파일 로드
         - hs_classification_data_us.json 파일 로드 (미국 관세청 품목분류 사례)
+        - hs_classification_data_eu.json 파일 로드 (EU 관세청 품목분류 사례)
         """
         # HS분류사례 파트 로드 (1~10)
         for i in range(1, 11):
@@ -51,6 +52,13 @@ class HSDataManager:
                 self.data['hs_classification_data_us'] = json.load(f)
         except FileNotFoundError:
             print('Warning: hs_classification_data_us.json not found')
+        
+        # EU 관세청 품목분류 사례 로드
+        try:
+            with open('knowledge/hs_classification_data_eu.json', 'r', encoding='utf-8') as f:
+                self.data['hs_classification_data_eu'] = json.load(f)
+        except FileNotFoundError:
+            print('Warning: hs_classification_data_eu.json not found')
     
     def build_search_index(self):
         """
@@ -108,7 +116,7 @@ class HSDataManager:
     
     def search_overseas(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """
-        해외(미국) HS 분류 데이터에서만 검색하는 메서드
+        해외(미국/EU) HS 분류 데이터에서만 검색하는 메서드
         Args:
             query: 검색할 쿼리 문자열
             max_results: 반환할 최대 결과 수 (기본값: 5)
@@ -118,13 +126,21 @@ class HSDataManager:
         query_keywords = self._extract_keywords(query)
         results = defaultdict(int)
         
-        # 미국 데이터에서만 검색
+        # 미국 데이터에서 검색
         us_data = self.data.get('hs_classification_data_us', [])
         for item in us_data:
             item_text = str(item)
             for keyword in query_keywords:
                 if keyword.lower() in item_text.lower():
                     results[('hs_classification_data_us', item_text)] += 1
+        
+        # EU 데이터에서 검색
+        eu_data = self.data.get('hs_classification_data_eu', [])
+        for item in eu_data:
+            item_text = str(item)
+            for keyword in query_keywords:
+                if keyword.lower() in item_text.lower():
+                    results[('hs_classification_data_eu', item_text)] += 1
         
         # 가중치 기준 정렬
         sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
@@ -163,7 +179,9 @@ class HSDataManager:
         context = []
         
         for result in results:
-            context.append(f"출처: {result['source']} (미국 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+            # 출처에 따라 국가 구분
+            country = "미국 관세청" if result['source'] == 'hs_classification_data_us' else "EU 관세청"
+            context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
         
         return "\n\n".join(context)
 
@@ -298,8 +316,8 @@ def classify_question(user_input):
     LLM(Gemini)을 활용하여 사용자의 질문을 아래 네 가지 유형 중 하나로 분류합니다.
     - 'web_search': 물품 개요, 용도, 기술개발, 무역동향, 산업동향 등
     - 'hs_classification': HS 코드, 품목분류, 관세 등
-    - 'hs_manual': HS 해설서, 규정, 판례 등 심층 분석
-    - 'overseas_hs': 해외(미국) HS 분류 사례
+    - 'hs_manual': HS 해설서 본문 심층 분석
+    - 'overseas_hs': 해외(미국/EU) HS 분류 사례
     """
     system_prompt = """
 아래는 HS 품목분류 전문가를 위한 질문 유형 분류 기준입니다.
@@ -307,8 +325,8 @@ def classify_question(user_input):
 질문 유형:
 1. "web_search" : "뉴스", "최근", "동향", "해외", "산업, 기술, 무역동향" 등 일반 정보 탐색이 필요한 경우.
 2. "hs_classification": HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. "hs_manual": HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
-4. "overseas_hs": "미국", "해외", "외국", "US", "America" 등 해외 HS 분류 사례가 필요한 경우.
+3. "hs_manual": HS 해설서 본문 심층 분석이 필요한 경우.
+4. "overseas_hs": "미국", "해외", "외국", "US", "America", "EU", "유럽" 등 해외 HS 분류 사례가 필요한 경우.
 
 아래 사용자 질문을 읽고, 반드시 위 네 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
 질문: """ + user_input + """\n답변:"""
@@ -355,7 +373,7 @@ def handle_overseas_hs(user_input, context, hs_manager):
     """해외 HS 분류 사례를 처리하는 함수"""
     overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
     relevant = hs_manager.get_overseas_context(user_input)
-    prompt = f"{overseas_context}\n\n관련 데이터 (미국 관세청):\n{relevant}\n\n사용자: {user_input}\n"
+    prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청):\n{relevant}\n\n사용자: {user_input}\n"
     model = genai.GenerativeModel('gemini-2.0-flash')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)

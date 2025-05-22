@@ -64,8 +64,8 @@ if 'context' not in st.session_state:
 질문 유형:
 1. 웹 검색(Web Search): 물품개요, 용도, 기술개발, 무역동향 등 일반 정보 탐색이 필요한 경우.
 2. HS 분류 검색(HS Classification Search): HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. HS 해설서 분석(HS Manual Analysis): HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
-4. 해외 HS 분류(Overseas HS Classification): 해외(미국) HS 분류 사례가 필요한 경우.
+3. HS 해설서 분석(HS Manual Analysis): HS 해설서 본문 심층 분석이 필요한 경우.
+4. 해외 HS 분류(Overseas HS Classification): 해외(미국/EU) HS 분류 사례가 필요한 경우.
 
 중요 지침:
 1. 사용자가 질문하는 물품에 대해 관련어, 유사품목, 대체품목도 함께 고려하여 가장 적합한 HS 코드를 찾아주세요.
@@ -115,7 +115,7 @@ with st.sidebar:
     - **웹 검색(Web Search)**: 물품개요, 용도, 뉴스, 무역동향, 산업동향 등 일반 정보 탐색이 필요한 경우 Serper API를 통해 최신 정보를 제공합니다.
     - **HS 분류 검색(HS Classification Search)**: 관세청의 품목분류 사례 약 1000개의 데이터베이스를 활용하여 HS 코드, 품목분류, 관세, 세율 등 정보를 제공합니다.
     - **HS 해설서 분석(HS Manual Analysis)**: HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우 관련 해설서와 규정을 바탕으로 답변합니다.
-    - **해외 HS 분류(Overseas HS Classification)**: 미국 관세청의 품목분류 사례를 활용하여 해외 HS 분류 정보를 제공합니다.
+    - **해외 HS 분류(Overseas HS Classification)**: 미국 및 EU 관세청의 품목분류 사례를 활용하여 해외 HS 분류 정보를 제공합니다.
 
     사용자는 HS 코드, 품목 분류, 시장 동향, 규정 해설, 해외 분류 사례 등 다양한 질문을 할 수 있습니다.
     """)
@@ -129,7 +129,7 @@ with st.sidebar:
 1. 웹 검색(Web Search): 물품개요, 용도, 뉴스, 무역동향, 산업동향 등 일반 정보 탐색이 필요한 경우.
 2. HS 분류 검색(HS Classification Search): HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
 3. HS 해설서 분석(HS Manual Analysis): HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
-4. 해외 HS 분류(Overseas HS Classification): 해외(미국) HS 분류 사례가 필요한 경우.
+4. 해외 HS 분류(Overseas HS Classification): 해외(미국/EU) HS 분류 사례가 필요한 경우.
 
 중요 지침:
 1. 사용자가 질문하는 물품에 대해 관련어, 유사품목, 대체품목도 함께 고려하여 가장 적합한 HS 코드를 찾아주세요.
