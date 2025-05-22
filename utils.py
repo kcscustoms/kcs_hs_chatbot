@@ -26,6 +26,7 @@ class HSDataManager:
         모든 HS 데이터 파일을 로드하는 메서드
         - HS분류사례_part1~10.json 파일 로드
         - HS위원회.json, HS협의회.json 파일 로드
+        - hs_classification_data_us.json 파일 로드 (미국 관세청 품목분류 사례)
         """
         # HS분류사례 파트 로드 (1~10)
         for i in range(1, 11):
@@ -43,6 +44,13 @@ class HSDataManager:
                     self.data[file.replace('.json', '')] = json.load(f)
             except FileNotFoundError:
                 print(f'Warning: {file} not found')
+        
+        # 미국 관세청 품목분류 사례 로드
+        try:
+            with open('knowledge/hs_classification_data_us.json', 'r', encoding='utf-8') as f:
+                self.data['hs_classification_data_us'] = json.load(f)
+        except FileNotFoundError:
+            print('Warning: hs_classification_data_us.json not found')
     
     def build_search_index(self):
         """
@@ -98,6 +106,35 @@ class HSDataManager:
             for (source, item_str), _ in sorted_results[:max_results]
         ]
     
+    def search_overseas(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        해외(미국) HS 분류 데이터에서만 검색하는 메서드
+        Args:
+            query: 검색할 쿼리 문자열
+            max_results: 반환할 최대 결과 수 (기본값: 5)
+        Returns:
+            해외 HS 분류 검색 결과 리스트
+        """
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 미국 데이터에서만 검색
+        us_data = self.data.get('hs_classification_data_us', [])
+        for item in us_data:
+            item_text = str(item)
+            for keyword in query_keywords:
+                if keyword.lower() in item_text.lower():
+                    results[('hs_classification_data_us', item_text)] += 1
+        
+        # 가중치 기준 정렬
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        
+        # 상위 결과만 반환
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+    
     def get_relevant_context(self, query: str) -> str:
         """
         쿼리에 관련된 컨텍스트를 생성하는 메서드
@@ -111,6 +148,22 @@ class HSDataManager:
         
         for result in results:
             context.append(f"출처: {result['source']}\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+    
+    def get_overseas_context(self, query: str) -> str:
+        """
+        해외 HS 분류 관련 컨텍스트를 생성하는 메서드
+        Args:
+            query: 컨텍스트를 생성할 쿼리 문자열
+        Returns:
+            해외 HS 분류 관련 컨텍스트 문자열
+        """
+        results = self.search_overseas(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']} (미국 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
         
         return "\n\n".join(context)
 
@@ -242,10 +295,11 @@ def web_search_answer(query, num_results=3):
 # 질문 유형 분류 함수 (LLM 기반)
 def classify_question(user_input):
     """
-    LLM(Gemini)을 활용하여 사용자의 질문을 아래 세 가지 유형 중 하나로 분류합니다.
+    LLM(Gemini)을 활용하여 사용자의 질문을 아래 네 가지 유형 중 하나로 분류합니다.
     - 'web_search': 물품 개요, 용도, 기술개발, 무역동향, 산업동향 등
     - 'hs_classification': HS 코드, 품목분류, 관세 등
     - 'hs_manual': HS 해설서, 규정, 판례 등 심층 분석
+    - 'overseas_hs': 해외(미국) HS 분류 사례
     """
     system_prompt = """
 아래는 HS 품목분류 전문가를 위한 질문 유형 분류 기준입니다.
@@ -254,15 +308,16 @@ def classify_question(user_input):
 1. "web_search" : "뉴스", "최근", "동향", "해외", "산업, 기술, 무역동향" 등 일반 정보 탐색이 필요한 경우.
 2. "hs_classification": HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
 3. "hs_manual": HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
+4. "overseas_hs": "미국", "해외", "외국", "US", "America" 등 해외 HS 분류 사례가 필요한 경우.
 
-아래 사용자 질문을 읽고, 반드시 위 세 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
+아래 사용자 질문을 읽고, 반드시 위 네 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
 질문: """ + user_input + """\n답변:"""
 
     model = genai.GenerativeModel('gemini-2.0-flash')
     response = model.generate_content(system_prompt)
     answer = response.text.strip().lower()
-    # 결과가 정확히 세 가지 중 하나인지 확인
-    if answer in ["web_search", "hs_classification", "hs_manual"]:
+    # 결과가 정확히 네 가지 중 하나인지 확인
+    if answer in ["web_search", "hs_classification", "hs_manual", "overseas_hs"]:
         return answer
     # 예외 처리: 분류 실패 시 기본값
     return "hs_classification"
@@ -292,6 +347,15 @@ def handle_hs_manual(user_input, context, hs_manager):
     hs_codes = extract_hs_codes(user_input)
     explanations = get_hs_explanations(hs_codes) if hs_codes else ""
     prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    resp = model.generate_content(prompt)
+    return clean_text(resp.text)
+
+def handle_overseas_hs(user_input, context, hs_manager):
+    """해외 HS 분류 사례를 처리하는 함수"""
+    overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
+    relevant = hs_manager.get_overseas_context(user_input)
+    prompt = f"{overseas_context}\n\n관련 데이터 (미국 관세청):\n{relevant}\n\n사용자: {user_input}\n"
     model = genai.GenerativeModel('gemini-2.0-flash')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)
