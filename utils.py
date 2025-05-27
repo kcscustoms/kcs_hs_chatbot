@@ -345,7 +345,7 @@ def handle_web_search(user_input, context, hs_manager):
     relevant = hs_manager.get_relevant_context(user_input)
     search_result = web_search_answer(user_input)
     prompt = f"{context}\n\n관련 데이터:\n{relevant}\n{search_result}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)
 
@@ -354,7 +354,7 @@ def handle_hs_classification_cases(user_input, context, hs_manager):
     # hs_codes = extract_hs_codes(user_input)
     # explanations = get_hs_explanations(hs_codes) if hs_codes else ""
     prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)
 
@@ -365,7 +365,7 @@ def handle_hs_manual(user_input, context, hs_manager):
     hs_codes = extract_hs_codes(user_input)
     explanations = get_hs_explanations(hs_codes) if hs_codes else ""
     prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)
 
@@ -374,6 +374,6 @@ def handle_overseas_hs(user_input, context, hs_manager):
     overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
     relevant = hs_manager.get_overseas_context(user_input)
     prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청):\n{relevant}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
     resp = model.generate_content(prompt)
     return clean_text(resp.text)
