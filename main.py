@@ -1,8 +1,9 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+
 import os
 from dotenv import load_dotenv
-from utils import HSDataManager, extract_hs_codes, clean_text, web_search_answer, classify_question
+from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
 from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
@@ -10,7 +11,7 @@ load_dotenv()
 
 # Gemini API 설정
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-genai.configure(api_key=GOOGLE_API_KEY)
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # Streamlit 페이지 설정
 st.set_page_config(

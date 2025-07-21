@@ -2,9 +2,15 @@ import json
 import re
 import os
 import requests
-import google.generativeai as genai
 from typing import Dict, List, Any
 from collections import defaultdict
+from google import genai
+from google.genai import types
+
+
+# API 키는 환경변수에서 자동으로 로드됩니다.
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
 class HSDataManager:
     """
@@ -276,40 +282,6 @@ def get_hs_explanations(hs_codes):
             all_explanations += f"호 해설:\n{number_explanation['text']}\n"
     return all_explanations
 
-# Serper API를 이용한 웹 검색 답변 함수
-def web_search_answer(query, num_results=3):
-    """
-    사용자의 질문에 대해 Serper API를 이용해 웹 검색 결과를 기반으로 답변을 생성합니다.
-    (Serper API 키 필요, https://serper.dev)
-    """
-    SERPER_API_KEY = os.getenv('SERPER_API_KEY')
-    if not SERPER_API_KEY:
-        return "웹 검색 API 키가 설정되어 있지 않습니다."
-    endpoint = "https://google.serper.dev/search"
-    headers = {
-        "X-API-KEY": SERPER_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "q": query,
-        "num": num_results
-    }
-    try:
-        response = requests.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
-        results = response.json().get("organic", [])
-        if not results:
-            return "웹 검색 결과를 찾을 수 없습니다."
-        answer = "웹 검색 결과 요약:\n"
-        for idx, item in enumerate(results, 1):
-            title = re.sub(r'<.*?>', '', item.get("title", ""))
-            snippet = re.sub(r'<.*?>', '', item.get("snippet", ""))
-            url = item.get("link", "")
-            answer += f"{idx}. [{title}]({url}): {snippet}\n"
-        return answer
-    except Exception as e:
-        return f"웹 검색 중 오류가 발생했습니다: {e}"
-
 # 질문 유형 분류 함수 (LLM 기반)
 def classify_question(user_input):
     """
@@ -331,8 +303,10 @@ def classify_question(user_input):
 아래 사용자 질문을 읽고, 반드시 위 네 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
 질문: """ + user_input + """\n답변:"""
 
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    response = model.generate_content(system_prompt)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash", # 또는 최신 모델로 변경 가능
+        contents=system_prompt,
+        )
     answer = response.text.strip().lower()
     # 결과가 정확히 네 가지 중 하나인지 확인
     if answer in ["web_search", "hs_classification", "hs_manual", "overseas_hs"]:
@@ -343,37 +317,56 @@ def classify_question(user_input):
 # 질문 유형별 처리 함수
 def handle_web_search(user_input, context, hs_manager):
     relevant = hs_manager.get_relevant_context(user_input)
-    search_result = web_search_answer(user_input)
-    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n{search_result}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
+    
+    # Define the grounding tool
+    grounding_tool = types.Tool(
+        google_search=types.GoogleSearch())
+
+    # Configure generation settings
+    config = types.GenerateContentConfig(
+        tools=[grounding_tool])
+    
+    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
+    
+    # client 호출 시 tools 파라미터에 검색 도구 추가
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=config)
+    
+    return clean_text(response.text)
 
 def handle_hs_classification_cases(user_input, context, hs_manager):
     relevant = hs_manager.get_relevant_context(user_input)
-    # hs_codes = extract_hs_codes(user_input)
-    # explanations = get_hs_explanations(hs_codes) if hs_codes else ""
     prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
+    # client.models.generate_content 사용
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", # 모델명 단순화
+        contents=prompt
+    )
+    return clean_text(response.text)
 
 def handle_hs_manual(user_input, context, hs_manager):
     # 예: HS 해설서 분석 전용 컨텍스트 추가
     manual_context = context + "\n(심층 해설서 분석 모드)"
-    # relevant = hs_manager.get_relevant_context(user_input)
     hs_codes = extract_hs_codes(user_input)
     explanations = get_hs_explanations(hs_codes) if hs_codes else ""
     prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
+    # client.models.generate_content 사용
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", # 모델명 단순화
+        contents=prompt
+    )
+    return clean_text(response.text)
 
 def handle_overseas_hs(user_input, context, hs_manager):
     """해외 HS 분류 사례를 처리하는 함수"""
     overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
     relevant = hs_manager.get_overseas_context(user_input)
     prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청):\n{relevant}\n\n사용자: {user_input}\n"
-    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
-    resp = model.generate_content(prompt)
-    return clean_text(resp.text)
+    # client.models.generate_content 사용
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", # 모델명 단순화
+        contents=prompt
+    )
+    return clean_text(response.text)
