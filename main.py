@@ -4,7 +4,7 @@ from google import genai
 import os
 from dotenv import load_dotenv
 from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
-from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs
+from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs, get_hs_explanations
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -58,6 +58,9 @@ def get_hs_manager():
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []  # 채팅 기록 저장
 
+if 'selected_category' not in st.session_state:
+    st.session_state.selected_category = "AI자동분류"  # 기본값
+
 if 'context' not in st.session_state:
     # 초기 컨텍스트 설정 (카테고리 분류 안내 추가)
     st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
@@ -85,7 +88,19 @@ def process_input():
 
     st.session_state.chat_history.append({"role": "user", "content": ui})
     hs_manager = get_hs_manager()
-    q_type = classify_question(ui)
+
+    if st.session_state.selected_category == "AI자동분류":
+        q_type = classify_question(ui)
+    else:
+        # 사용자 선택에 따른 매핑
+        category_mapping = {
+            "웹검색": "web_search",
+            "국내HS분류사례 검색": "hs_classification", 
+            "해외HS분류사례검색": "overseas_hs",
+            "HS해설서분석": "hs_manual",
+            "HS해설서원문검색": "hs_manual_raw"
+        }
+        q_type = category_mapping.get(st.session_state.selected_category, "hs_classification")
 
     # 질문 유형별 분기
     if q_type == "web_search":
@@ -96,6 +111,12 @@ def process_input():
         answer = "\n\n +++ HS 해설서 분석 실시 +++ \n\n" + handle_hs_manual(ui, st.session_state.context, hs_manager)
     elif q_type == "overseas_hs":
         answer = "\n\n +++ 해외 HS 분류 검색 실시 +++ \n\n" + handle_overseas_hs(ui, st.session_state.context, hs_manager)
+    elif q_type == "hs_manual_raw":
+        hs_codes = extract_hs_codes(ui)
+        if hs_codes:
+            answer = "\n\n +++ HS 해설서 원문 검색 실시 +++ \n\n" + clean_text(get_hs_explanations(hs_codes))
+        else:
+            answer = "HS 코드를 찾을 수 없습니다. 4자리 HS 코드를 입력해주세요. (예: 1234 또는 HS1234)"
     else:
         # 예외 처리: 기본 HS 분류
         answer = handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
@@ -146,6 +167,16 @@ with st.sidebar:
 # 메인 페이지 설정
 st.title("HS 품목분류 챗봇")
 st.write("HS 품목분류에 대해 질문해주세요!")
+
+# 질문 유형 선택 라디오 버튼
+st.session_state.selected_category = st.radio(
+    "질문 유형을 선택하세요:",
+    ["AI자동분류", "웹검색", "국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석", "HS해설서원문검색"],
+    index=0,  # 기본값: AI자동분류
+    horizontal=True
+)
+
+st.divider()  # 구분선 추가
 
 # 채팅 기록 표시
 for message in st.session_state.chat_history:

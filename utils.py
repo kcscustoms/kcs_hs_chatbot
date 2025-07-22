@@ -199,20 +199,38 @@ def clean_text(text):
     return text.strip()
 
 # HS 코드 추출 패턴 정의 및 함수
+# 더 유연한 HS 코드 추출 패턴
 HS_PATTERN = re.compile(
-    r'\b(?:HS)?\s*\d{4}(?:[.-]\d{2}(?:[.-]\d{2}(?:[.-]\d{2})?)?)?\b',
+    r'(?:HS\s*)?(\d{4}(?:[.-]?\d{2}(?:[.-]?\d{2}(?:[.-]?\d{2})?)?)?)',
     flags=re.IGNORECASE
 )
 
 def extract_hs_codes(text):
-    """여러 HS 코드를 추출하고, 중복 제거 및 숫자만 남겨 표준화"""
+    """
+    여러 HS 코드를 추출하고, 중복 제거 및 숫자만 남겨 표준화
+    개선사항:
+    - 단어 경계(\b) 제거로 더 유연한 매칭
+    - 숫자만 있는 경우도 처리 가능
+    - 최소 4자리 숫자 체크 추가
+    """
     matches = HS_PATTERN.findall(text)
     hs_codes = []
+    
     for raw in matches:
         # 숫자만 남기기
         code = re.sub(r'\D', '', raw)
-        if code and code not in hs_codes:
+        # 최소 4자리이고 중복이 아닌 경우만 추가
+        if len(code) >= 4 and code not in hs_codes:
             hs_codes.append(code)
+    
+    # 만약 위 패턴으로 찾지 못하고, 입력이 4자리 이상의 숫자로만 구성된 경우
+    if not hs_codes:
+        # 순수 숫자만 있는 경우 체크
+        numbers_only = re.findall(r'\d{4,}', text)
+        for num in numbers_only:
+            if num not in hs_codes:
+                hs_codes.append(num)
+    
     return hs_codes
 
 def extract_and_store_text(json_file):
@@ -245,24 +263,23 @@ def lookup_hscode(hs_code, json_file):
             data = json.load(file)
         
         # 각 설명 유형별 초기값 설정
-        explanation = {"text": "해당 부에 대한 설명을 찾을 수 없습니다."}
-        type_explanation = {"text": "해당 류에 대한 설명을 찾을 수 없습니다."}
-        number_explanation = {"text": "해당 호에 대한 설명을 찾을 수 없습니다."}
+        part_explanation = {"text": "해당 부에 대한 설명을 찾을 수 없습니다."}
+        chapter_explanation = {"text": "해당 류에 대한 설명을 찾을 수 없습니다."}
+        sub_explanation = {"text": "해당 호에 대한 설명을 찾을 수 없습니다."}
+
+        # 1) 류(類) key: "제00류"
+        chapter_key = f"제{int(hs_code[:2])}류"
+        chapter_explanation = next((g for g in data if g.get('header2') == chapter_key), chapter_explanation)
+
+        # 2) 호 key: "00.00"
+        sub_key = f"{hs_code[:2]}.{hs_code[2:]}"
+        sub_explanation = next((g for g in data if g.get('header2') == sub_key), sub_explanation)
+
+        # 3) 부(部) key: "제00부"
+        part_key = chapter_explanation.get('header1') if chapter_explanation else None
+        part_explanation = next((g for g in data if (g.get('header1') == part_key)&(re.sub(r'제\s*(\d+)\s*부', r'제\1부', g.get('header1')) == part_key)), None)
         
-        # 코드 길이에 따른 패턴 매칭
-        if len(hs_code) >= 2:
-            section_code = hs_code[:2]
-            explanation = next((item for item in data if item.get("code", "") == section_code), explanation)
-        
-        if len(hs_code) >= 4:
-            type_code = hs_code[:4]
-            type_explanation = next((item for item in data if item.get("code", "") == type_code), type_explanation)
-        
-        if len(hs_code) >= 6:
-            number_code = hs_code[:6]
-            number_explanation = next((item for item in data if item.get("code", "") == number_code), number_explanation)
-        
-        return explanation, type_explanation, number_explanation
+        return part_explanation, chapter_explanation, sub_explanation
     
     except Exception as e:
         print(f"HS 코드 조회 오류: {e}")
@@ -299,8 +316,9 @@ def classify_question(user_input):
 2. "hs_classification": HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
 3. "hs_manual": HS 해설서 본문 심층 분석이 필요한 경우.
 4. "overseas_hs": "미국", "해외", "외국", "US", "America", "EU", "유럽" 등 해외 HS 분류 사례가 필요한 경우.
+5. "hs_manual_raw": HS 코드만 입력하여 해설서 원문을 보고 싶은 경우.
 
-아래 사용자 질문을 읽고, 반드시 위 네 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
+아래 사용자 질문을 읽고, 반드시 위 다섯 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
 질문: """ + user_input + """\n답변:"""
 
     response = client.models.generate_content(
@@ -309,7 +327,7 @@ def classify_question(user_input):
         )
     answer = response.text.strip().lower()
     # 결과가 정확히 네 가지 중 하나인지 확인
-    if answer in ["web_search", "hs_classification", "hs_manual", "overseas_hs"]:
+    if answer in ["web_search", "hs_classification", "hs_manual", "overseas_hs", "hs_manual_raw"]:
         return answer
     # 예외 처리: 분류 실패 시 기본값
     return "hs_classification"
@@ -339,6 +357,19 @@ def handle_web_search(user_input, context, hs_manager):
 def handle_hs_classification_cases(user_input, context, hs_manager):
     relevant = hs_manager.get_relevant_context(user_input)
     prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
+    # client.models.generate_content 사용
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", # 모델명 단순화
+        contents=prompt
+    )
+    return clean_text(response.text)
+
+def handle_hs_manual(user_input, context, hs_manager):
+    # 예: HS 해설서 분석 전용 컨텍스트 추가
+    manual_context = context + "\n(심층 해설서 분석 모드)"
+    hs_codes = extract_hs_codes(user_input)
+    explanations = get_hs_explanations(hs_codes) if hs_codes else ""
+    prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
     # client.models.generate_content 사용
     response = client.models.generate_content(
         model="gemini-2.5-flash", # 모델명 단순화
