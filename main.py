@@ -126,7 +126,7 @@ def process_input():
     st.session_state.user_input = ""
 
 
-# 사이드바 설정
+# 사이드바 설정 (main.py의 with st.sidebar: 부분 교체)
 with st.sidebar:
     st.title("HS Chatbot")
     st.markdown("""
@@ -134,12 +134,17 @@ with st.sidebar:
 
     이 챗봇은 다음과 같은 방식으로 사용자의 질문에 답변합니다:
 
-    - **웹 검색(Web Search)**: 물품개요, 용도, 뉴스, 무역동향, 산업동향 등 일반 정보 탐색이 필요한 경우 Serper API를 통해 최신 정보를 제공합니다.
-    - **HS 분류 검색(HS Classification Search)**: 관세청의 품목분류 사례 약 1000개의 데이터베이스를 활용하여 HS 코드, 품목분류, 관세, 세율 등 정보를 제공합니다.
-    - **HS 해설서 분석(HS Manual Analysis)**: HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우 관련 해설서와 규정을 바탕으로 답변합니다.
-    - **해외 HS 분류(Overseas HS Classification)**: 미국 및 EU 관세청의 품목분류 사례를 활용하여 해외 HS 분류 정보를 제공합니다.
+    - **웹 검색(Web Search)**: 물품개요, 용도, 뉴스, 무역동향, 산업동향 등 일반 정보 탐색 시 Serper API를 통해 최신 정보를 제공합니다.
+    
+    - **국내 HS 분류 검색(HS Classification Search)**: 관세청의 품목분류 사례 약 1,000개 데이터베이스를 **Multi Agents 시스템**으로 분석합니다. 데이터를 5개 그룹으로 분할하여 각 그룹별로 가장 유사한 3개 사례를 찾고, Head Agent가 최종 취합하여 전문적인 HS 코드 분류 답변을 제공합니다.
+    
+    - **해외 HS 분류(Overseas HS Classification)**: 미국 및 EU 관세청의 품목분류 사례를 **Multi Agents 시스템**으로 분석합니다. 해외 데이터를 5개 그룹으로 분할하여 각 그룹별 유사 사례 3개씩을 찾고, Head Agent가 종합하여 해외 분류 동향을 제공합니다.
+    
+    - **HS 해설서 분석(HS Manual Analysis)**: HS 해설서, 통칙, 규정 등을 바탕으로 품목의 성분, 용도, 가공상태를 고려한 심층 분석을 제공합니다.
+    
+    - **AI 자동분류**: 사용자 질문을 LLM이 자동으로 분석하여 위 4가지 유형 중 가장 적합한 방식으로 답변합니다.
 
-    사용자는 HS 코드, 품목 분류, 시장 동향, 규정 해설, 해외 분류 사례 등 다양한 질문을 할 수 있습니다.
+    **핵심 특징**: 국내외 품목분류 사례 분석 시 Multi Agents 구조를 활용하여 대용량 데이터에서 최적의 분류 사례를 찾아 전문적이고 정확한 답변을 제공합니다.
     """)
     
     # 새로운 채팅 시작 버튼
@@ -185,9 +190,15 @@ for message in st.session_state.chat_history:
                    <strong>사용자:</strong> {message['content']}
                    </div>""", unsafe_allow_html=True)
     else:
-        st.markdown(f"""<div style='background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>
-                   <strong>품목분류 전문가:</strong> {message['content']}
-                   </div>""", unsafe_allow_html=True)
+        # HS 해설서 원문인지 확인
+        if "+++ HS 해설서 원문 검색 실시 +++" in message['content']:
+            # 마크다운으로 렌더링하여 구조화된 형태로 표시
+            st.markdown("**품목분류 전문가:**")
+            st.markdown(message['content'])
+        else:
+            st.markdown(f"""<div style='background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>
+                    <strong>품목분류 전문가:</strong> {message['content']}
+                    </div>""", unsafe_allow_html=True)
 
 
 # 하단 입력 영역 (Enter 키로만 전송)

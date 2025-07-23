@@ -6,9 +6,12 @@ from typing import Dict, List, Any
 from collections import defaultdict
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
 
 
-# API 키는 환경변수에서 자동으로 로드됩니다.
+
+# 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
+load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
@@ -120,43 +123,161 @@ class HSDataManager:
             for (source, item_str), _ in sorted_results[:max_results]
         ]
     
-    def search_overseas(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """
-        해외(미국/EU) HS 분류 데이터에서만 검색하는 메서드
-        Args:
-            query: 검색할 쿼리 문자열
-            max_results: 반환할 최대 결과 수 (기본값: 5)
-        Returns:
-            해외 HS 분류 검색 결과 리스트
-        """
+    def search_domestic_group(self, query: str, group_idx: int, max_results: int = 3) -> List[Dict[str, Any]]:
+        """국내 HS 분류 데이터 그룹별 검색 메서드"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+
+        # 그룹별 데이터 소스 정의 (5개 그룹)
+        group_sources = [
+            ['HS분류사례_part1', 'HS분류사례_part2'],  # 그룹1
+            ['HS분류사례_part3', 'HS분류사례_part4'],  # 그룹2
+            ['HS분류사례_part5', 'HS분류사례_part6'],  # 그룹3
+            ['HS분류사례_part7', 'HS분류사례_part8'],  # 그룹4
+            ['HS분류사례_part9', 'HS분류사례_part10', 'knowledge/HS위원회', 'knowledge/HS협의회']  # 그룹5
+        ]
+        sources = group_sources[group_idx]
+
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                if source in sources:
+                    results[(source, str(item))] += 1
+
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+
+    def get_domestic_context_group(self, query: str, group_idx: int) -> str:
+        """국내 HS 분류 관련 컨텍스트(그룹별)를 생성하는 메서드"""
+        results = self.search_domestic_group(query, group_idx)
+        context = []
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        return "\n\n".join(context)
+
+    def search_overseas_group(self, query: str, group_idx: int, max_results: int = 3) -> List[Dict[str, Any]]:
+        """해외 HS 분류 데이터 그룹별 검색 메서드"""
         query_keywords = self._extract_keywords(query)
         results = defaultdict(int)
         
-        # 미국 데이터에서 검색
-        us_data = self.data.get('hs_classification_data_us', [])
-        for item in us_data:
-            item_text = str(item)
-            for keyword in query_keywords:
-                if keyword.lower() in item_text.lower():
-                    results[('hs_classification_data_us', item_text)] += 1
+        # 해외 데이터를 그룹별로 분할 처리
+        if group_idx < 3:  # 그룹 0,1,2는 미국 데이터
+            target_source = 'hs_classification_data_us'
+            # 미국 데이터를 3등분
+            us_data = self.data.get(target_source, [])
+            chunk_size = len(us_data) // 3
+            start_idx = group_idx * chunk_size
+            end_idx = start_idx + chunk_size if group_idx < 2 else len(us_data)
+            target_items = us_data[start_idx:end_idx]
+        else:  # 그룹 3,4는 EU 데이터
+            target_source = 'hs_classification_data_eu'
+            # EU 데이터를 2등분
+            eu_data = self.data.get(target_source, [])
+            chunk_size = len(eu_data) // 2
+            eu_group_idx = group_idx - 3  # 0 or 1
+            start_idx = eu_group_idx * chunk_size
+            end_idx = start_idx + chunk_size if eu_group_idx < 1 else len(eu_data)
+            target_items = eu_data[start_idx:end_idx]
         
-        # EU 데이터에서 검색
-        eu_data = self.data.get('hs_classification_data_eu', [])
-        for item in eu_data:
-            item_text = str(item)
-            for keyword in query_keywords:
-                if keyword.lower() in item_text.lower():
-                    results[('hs_classification_data_eu', item_text)] += 1
+        # 해당 그룹 데이터에서만 검색
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                if source == target_source and item in target_items:
+                    results[(source, str(item))] += 1
         
-        # 가중치 기준 정렬
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+
+    def get_overseas_context_group(self, query: str, group_idx: int) -> str:
+        """해외 HS 분류 관련 컨텍스트(그룹별)를 생성하는 메서드"""
+        results = self.search_overseas_group(query, group_idx)
+        context = []
+        
+        for result in results:
+            # 출처에 따라 국가 구분
+            if result['source'] == 'hs_classification_data_us':
+                country = "미국 관세청"
+            elif result['source'] == 'hs_classification_data_eu':
+                country = "EU 관세청"
+            else:
+                country = "해외 관세청"
+                
+            context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+    
+    def search_domestic(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """국내 HS 분류 데이터에서만 검색하는 메서드"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 국내 데이터 소스만 필터링
+        domestic_sources = [
+            'HS분류사례_part1', 'HS분류사례_part2', 'HS분류사례_part3', 'HS분류사례_part4', 'HS분류사례_part5',
+            'HS분류사례_part6', 'HS분류사례_part7', 'HS분류사례_part8', 'HS분류사례_part9', 'HS분류사례_part10',
+            'knowledge/HS위원회', 'knowledge/HS협의회'
+        ]
+        
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                # 국내 데이터 소스만 포함
+                if source in domestic_sources:
+                    results[(source, str(item))] += 1
+        
         sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
         
-        # 상위 결과만 반환
         return [
             {'source': source, 'item': eval(item_str)}
             for (source, item_str), _ in sorted_results[:max_results]
         ]
     
+    def get_domestic_context(self, query: str) -> str:
+        """국내 HS 분류 관련 컨텍스트를 생성하는 메서드"""
+        results = self.search_domestic(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+    
+    def search_overseas_improved(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """해외 HS 분류 데이터에서만 검색하는 개선된 메서드 (search_index 활용)"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 해외 데이터 소스만 필터링
+        overseas_sources = ['hs_classification_data_us', 'hs_classification_data_eu']
+        
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                # 해외 데이터 소스만 포함
+                if source in overseas_sources:
+                    results[(source, str(item))] += 1
+        
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+    
+    def get_domestic_context(self, query: str) -> str:
+        """국내 HS 분류 관련 컨텍스트를 생성하는 메서드"""
+        results = self.search_domestic(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+
+
     def get_relevant_context(self, query: str) -> str:
         """
         쿼리에 관련된 컨텍스트를 생성하는 메서드
@@ -173,20 +294,20 @@ class HSDataManager:
         
         return "\n\n".join(context)
     
-    def get_overseas_context(self, query: str) -> str:
-        """
-        해외 HS 분류 관련 컨텍스트를 생성하는 메서드
-        Args:
-            query: 컨텍스트를 생성할 쿼리 문자열
-        Returns:
-            해외 HS 분류 관련 컨텍스트 문자열
-        """
-        results = self.search_overseas(query)
+    def get_overseas_context_improved(self, query: str) -> str:
+        """해외 HS 분류 관련 컨텍스트를 생성하는 개선된 메서드"""
+        results = self.search_overseas_improved(query)
         context = []
         
         for result in results:
             # 출처에 따라 국가 구분
-            country = "미국 관세청" if result['source'] == 'hs_classification_data_us' else "EU 관세청"
+            if result['source'] == 'hs_classification_data_us':
+                country = "미국 관세청"
+            elif result['source'] == 'hs_classification_data_eu':
+                country = "EU 관세청"
+            else:
+                country = "해외 관세청"
+                
             context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
         
         return "\n\n".join(context)
@@ -286,17 +407,25 @@ def lookup_hscode(hs_code, json_file):
         return ({"text": "오류가 발생했습니다."}, {"text": "오류가 발생했습니다."}, {"text": "오류가 발생했습니다."})
 
 def get_hs_explanations(hs_codes):
-    """여러 HS 코드에 대한 해설을 취합하는 함수"""
+    """여러 HS 코드에 대한 해설을 취합하는 함수 (마크다운 형식)"""
     all_explanations = ""
     for hs_code in hs_codes:
         explanation, type_explanation, number_explanation = lookup_hscode(hs_code, 'knowledge/grouped_11_end.json')
 
         if explanation and type_explanation and number_explanation:
-            all_explanations += f"\n\nHS 코드 {hs_code}에 대한 해설:\n"
-            all_explanations += f"해설서 통칙:\n{general_explanation}\n\n"
-            all_explanations += f"부 해설:\n{explanation['text']}\n\n"
-            all_explanations += f"류 해설:\n{type_explanation['text']}\n\n"
-            all_explanations += f"호 해설:\n{number_explanation['text']}\n"
+            all_explanations += f"\n\n# HS 코드 {hs_code} 해설\n\n"
+            all_explanations += f"## 📋 해설서 통칙\n\n"
+            
+            # 통칙 내용을 리스트 형태로 정리
+            if general_explanation:
+                for i, rule in enumerate(general_explanation[:5], 1):  # 처음 5개만 표시
+                    all_explanations += f"### 통칙 {i}\n{rule}\n\n"
+            
+            all_explanations += f"## 📂 부(部) 해설\n\n{explanation['text']}\n\n"
+            all_explanations += f"## 📚 류(類) 해설\n\n{type_explanation['text']}\n\n"
+            all_explanations += f"## 📝 호(號) 해설\n\n{number_explanation['text']}\n\n"
+            all_explanations += "---\n"  # 구분선 추가
+    
     return all_explanations
 
 # 질문 유형 분류 함수 (LLM 기반)
@@ -334,48 +463,46 @@ def classify_question(user_input):
 
 # 질문 유형별 처리 함수
 def handle_web_search(user_input, context, hs_manager):
-    relevant = hs_manager.get_relevant_context(user_input)
+    # 웹검색 전용 컨텍스트로 수정
+    web_context = """당신은 HS 품목분류 전문가입니다. 
+사용자의 질문에 대해 최신 웹 정보를 검색하여 물품개요, 용도, 기술개발, 무역동향, 산업동향 등의 정보를 제공해주세요.
+국내 HS 분류 사례가 아닌 일반적인 시장 정보와 동향을 중심으로 답변해주세요."""
     
-    # Define the grounding tool
-    grounding_tool = types.Tool(
-        google_search=types.GoogleSearch())
-
-    # Configure generation settings
-    config = types.GenerateContentConfig(
-        tools=[grounding_tool])
+    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    config = types.GenerateContentConfig(tools=[grounding_tool])
     
-    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
+    prompt = f"{web_context}\n\n사용자: {user_input}\n"
     
-    # client 호출 시 tools 파라미터에 검색 도구 추가
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=config)
     
     return clean_text(response.text)
 
 def handle_hs_classification_cases(user_input, context, hs_manager):
-    relevant = hs_manager.get_relevant_context(user_input)
-    prompt = f"{context}\n\n관련 데이터:\n{relevant}\n\n사용자: {user_input}\n"
-    # client.models.generate_content 사용
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", # 모델명 단순화
-        contents=prompt
-    )
-    return clean_text(response.text)
+    """국내 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
+    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
+    group_answers = []
+    for i in range(5):  # 3 → 5로 변경
+        relevant = hs_manager.get_domestic_context_group(user_input, i)
+        prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        group_answers.append(clean_text(response.text))
 
-def handle_hs_manual(user_input, context, hs_manager):
-    # 예: HS 해설서 분석 전용 컨텍스트 추가
-    manual_context = context + "\n(심층 해설서 분석 모드)"
-    hs_codes = extract_hs_codes(user_input)
-    explanations = get_hs_explanations(hs_codes) if hs_codes else ""
-    prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
-    # client.models.generate_content 사용
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", # 모델명 단순화
-        contents=prompt
+    # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
+    head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+    for idx, ans in enumerate(group_answers):
+        head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    head_response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=head_prompt
     )
-    return clean_text(response.text)
+    return clean_text(head_response.text)
 
 def handle_hs_manual(user_input, context, hs_manager):
     # 예: HS 해설서 분석 전용 컨텍스트 추가
@@ -391,13 +518,27 @@ def handle_hs_manual(user_input, context, hs_manager):
     return clean_text(response.text)
 
 def handle_overseas_hs(user_input, context, hs_manager):
-    """해외 HS 분류 사례를 처리하는 함수"""
+    """해외 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
     overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
-    relevant = hs_manager.get_overseas_context(user_input)
-    prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청):\n{relevant}\n\n사용자: {user_input}\n"
-    # client.models.generate_content 사용
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", # 모델명 단순화
-        contents=prompt
+    
+    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
+    group_answers = []
+    for i in range(5):
+        relevant = hs_manager.get_overseas_context_group(user_input, i)
+        prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        group_answers.append(clean_text(response.text))
+
+    # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
+    head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+    for idx, ans in enumerate(group_answers):
+        head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    head_response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=head_prompt
     )
-    return clean_text(response.text)
+    return clean_text(head_response.text)
