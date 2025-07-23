@@ -7,11 +7,8 @@ from collections import defaultdict
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-import time
-import logging
-# 로깅 설정 추가
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -483,70 +480,29 @@ def handle_web_search(user_input, context, hs_manager):
     
     return clean_text(response.text)
 
-def summarize_prompt_if_needed(prompt, max_length=10000):
-
-    """
-    프롬프트 길이에 따라 처리 방식 결정
-    - 5000자 이하: 그대로 사용
-    - 5000자 이상: LLM으로 요약
-    """
-    prompt_length = len(prompt)
-
-    if prompt_length <= max_length:
-        return prompt
-    else:
-        
-        print(f"프롬프트 길이 {prompt_length}자 -> 10000자로 자르기")
-        return prompt[:max_length] + "...(내용 일부 생략)"
-
-
-
 def handle_hs_classification_cases(user_input, context, hs_manager):
     """국내 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
+    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
     group_answers = []
-    for i in range(5):
-        try:
-            relevant = hs_manager.get_domestic_context_group(user_input, i)
-            
-            if not relevant or relevant.strip() == "":
-                group_answers.append(f"그룹{i+1}에서 관련 데이터를 찾을 수 없습니다.")
-                continue
-                
-            prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-            
-            # 프롬프트 요약 적용
-            prompt = summarize_prompt_if_needed(prompt)
-            
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
-            group_answers.append(clean_text(response.text))
-            time.sleep(0.5)
-            
-        except Exception as e:
-            logger.error(f"그룹{i+1} 처리 중 오류: {str(e)}")
-            group_answers.append(f"그룹{i+1} 처리 중 오류가 발생했습니다.")
-
-    # Head Agent 처리
-    try:
-        head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-        for idx, ans in enumerate(group_answers):
-            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-        head_prompt += f"\n사용자: {user_input}\n"
-        
-        # Head Agent 프롬프트도 요약 적용
-        head_prompt = summarize_prompt_if_needed(head_prompt, max_length=3000)
-        
-        head_response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=head_prompt
+    for i in range(5):  # 3 → 5로 변경
+        relevant = hs_manager.get_domestic_context_group(user_input, i)
+        prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
         )
-        return clean_text(head_response.text)
-        
-    except Exception as e:
-        logger.error(f"Head Agent 처리 중 오류: {str(e)}")
-        return "\n\n".join([f"그룹{i+1}: {ans}" for i, ans in enumerate(group_answers)])
+        group_answers.append(clean_text(response.text))
+
+    # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
+    head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+    for idx, ans in enumerate(group_answers):
+        head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    head_response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=head_prompt
+    )
+    return clean_text(head_response.text)
 
 def handle_hs_manual(user_input, context, hs_manager):
     # 예: HS 해설서 분석 전용 컨텍스트 추가
@@ -568,48 +524,21 @@ def handle_overseas_hs(user_input, context, hs_manager):
     # 5개 그룹별로 각각 Gemini에 부분 답변 요청
     group_answers = []
     for i in range(5):
-        try:
-            relevant = hs_manager.get_overseas_context_group(user_input, i)
-            
-            if not relevant or relevant.strip() == "":
-                group_answers.append(f"그룹{i+1}에서 관련 데이터를 찾을 수 없습니다.")
-                continue
-                
-            prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-            
-            # 프롬프트 길이 체크 및 요약
-            prompt = summarize_prompt_if_needed(prompt)
-            
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
-            group_answers.append(clean_text(response.text))
-            
-            # API 호출 간격 추가
-            time.sleep(0.5)
-            
-        except Exception as e:
-            logger.error(f"그룹{i+1} 처리 중 오류: {str(e)}")
-            group_answers.append(f"그룹{i+1} 처리 중 오류가 발생했습니다.")
+        relevant = hs_manager.get_overseas_context_group(user_input, i)
+        prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        group_answers.append(clean_text(response.text))
 
     # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
-    try:
-        head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-        
-        for idx, ans in enumerate(group_answers):
-            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-        head_prompt += f"\n사용자: {user_input}\n"
-        
-        # Head Agent 프롬프트도 요약 적용
-        head_prompt = summarize_prompt_if_needed(head_prompt, max_length=3000)
-        
-        head_response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=head_prompt
-        )
-        return clean_text(head_response.text)
-        
-    except Exception as e:
-        logger.error(f"Head Agent 처리 중 오류: {str(e)}")
-        return "\n\n".join([f"그룹{i+1}: {ans}" for i, ans in enumerate(group_answers)])
+    head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+    for idx, ans in enumerate(group_answers):
+        head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    head_response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=head_prompt
+    )
+    return clean_text(head_response.text)
