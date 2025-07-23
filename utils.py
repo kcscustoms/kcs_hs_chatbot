@@ -1,514 +1,615 @@
-import PyPDF2
-import google.generativeai as genai
-import os
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import streamlit as st
+import json
 import re
-# utils.py 상단에 추가
-from pdfminer.high_level import extract_text as pdfminer_extract_text
+import os
+import requests
+from typing import Dict, List, Any
+from collections import defaultdict
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+import time
+import logging
+# 로깅 설정 추가
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 법령 카테고리 및 PDF 파일 경로
-LAW_CATEGORIES = {
-    "관세조사": {  # Updated category name
-        "관세법": "laws/관세법.pdf",
-        "관세법 시행령": "laws/관세법 시행령.pdf",
-        "관세법 시행규칙": "laws/관세법 시행규칙.pdf",
-        "관세평가 운영에 관한 고시": "laws/관세평가 운영에 관한 고시.pdf",
-        "관세조사 운영에 관한 훈령": "laws/관세조사 운영에 관한 훈령.pdf",
-    },
-    "관세평가": {  # Updated category name
-        "WTO관세평가협정": "laws/WTO관세평가협정_영문판.pdf",
-        "TCCV기술문서_영문판": "laws/TCCV기술문서_영문판.pdf",
-        "관세와무역에관한일반협정제7조_영문판": "laws/관세와무역에관한일반협정제7조_영문판.pdf",
-        "권고의견_영문판": "laws/권고의견_영문판.pdf",
-        "사례연구_영문판": "laws/사례연구_영문판.pdf",
-        "연구_영문판": "laws/연구_영문판.pdf",
-        "해설_영문판": "laws/해설_영문판.pdf",
-        "Customs_Valuation_Archer_part1": "laws/customs_valuation_archer_part1.pdf",
-        "Customs_Valuation_Archer_part2": "laws/customs_valuation_archer_part2.pdf",
-        "Customs_Valuation_Archer_part3": "laws/customs_valuation_archer_part3.pdf",
-        "Customs_Valuation_Archer_part4": "laws/customs_valuation_archer_part4.pdf",
-        "Customs_Valuation_Archer_part5": "laws/customs_valuation_archer_part5.pdf",
-    },
-    "자유무역협정": {
-        "원산지조사 운영에 관한 훈령": "laws/원산지조사 운영에 관한 훈령.pdf",
-        "자유무역협정 원산지인증수출자 운영에 관한 고시": "laws/자유무역협정 원산지인증수출자 운영에 관한 고시.pdf",
-        "특례법 사무처리에 관한 고시": "laws/자유무역협정의 이행을 위한 관세법의 특례에 관한 법률 사무처리에 관한 고시.pdf",
-        "특례법 시행규칙": "laws/자유무역협정의 이행을 위한 관세법의 특례에 관한 법률 시행규칙.pdf",
-        "특례법 시행령": "laws/자유무역협정의 이행을 위한 관세법의 특례에 관한 법률 시행령.pdf",
-        "특례법": "laws/자유무역협정의 이행을 위한 관세법의 특례에 관한 법률.pdf"
-    },
-    "외국환거래": {
-        "외국환거래법": "laws/외국환거래법.pdf",
-        "외국환거래법 시행령": "laws/외국환거래법 시행령.pdf", 
-        "외국환거래규정": "laws/외국환거래규정.pdf"
-    },
-    "대외무역거래": {
-        "대외무역법": "laws/대외무역법.pdf",
-        "대외무역법 시행령": "laws/대외무역법 시행령.pdf", 
-        "대외무역관리규정": "laws/대외무역관리규정.pdf",
-        "원산지표시제도 운영에 관한 고시": "laws/원산지표시제도 운영에 관한 고시.pdf",
-    },
-    "환급": {
-        "환급특례법": "laws/수출용 원재료에 대한 관세 등 환급에 관한 특례법.pdf",
-        "환급특례법 시행령": "laws/수출용 원재료에 대한 관세 등 환급에 관한 특례법 시행령.pdf", 
-        "환급특례법 시행규칙": "laws/수출용 원재료에 대한 관세 등 환급에 관한 특례법 시행규칙.pdf",
-        "수입물품에 대한 개별소비세와 주세 등의 환급에 관한 고시": "laws/수입물품에 대한 개별소비세와 주세 등의 환급에 관한 고시.pdf",
-        "대체수출물품 관세환급에 따른 수출입통관절차 및 환급처리에 관한 예규":"laws/대체수출물품 관세환급에 따른 수출입통관절차 및 환급처리에 관한 예규.pdf",
-        "수입원재료에 대한 환급방법 조정에 관한 고시": "laws/수입원재료에 대한 환급방법 조정에 관한 고시.pdf",
-        "수출용 원재료에 대한 관세 등 환급사무에 관한 훈령": "laws/수출용 원재료에 대한 관세 등 환급사무에 관한 훈령.pdf",
-        "수출용 원재료에 대한 관세 등 환급사무처리에 관한 고시": "laws/수출용 원재료에 대한 관세 등 환급사무처리에 관한 고시.pdf",
-        "위탁가공 수출물품에 대한 관세 등 환급처리에 관한 예규": "laws/위탁가공 수출물품에 대한 관세 등 환급처리에 관한 예규.pdf",
-    }
-}
+# 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
+load_dotenv()
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# 카테고리별 키워드 정보 (AI 분류에 도움을 주기 위한 참고 정보)
-CATEGORY_KEYWORDS = {
-    "관세조사": ["관세 조사", "세액심사", "관세법", "관세 평가", "관세조사", "세관장", "세액", "조사", "통관", "사후심사", "관세부과", "서면심사"],
-    "관세평가": ["관세 평가", "WTO", "TCCV", "관세평가협정", "과세가격", "거래가격", "조정가격", "거래가치", "덤핑", "평가", "수입물품가격", "관세가액"],
-    "자유무역협정": ["FTA", "원산지", "원산지증명서", "원산지인증", "특례법", "협정관세", "원산지결정기준", "원산지검증", "원산지조사", "인증수출자"],
-    "외국환거래": ["외국환", "외국환거래", "외환", "외환거래", "송금", "환전", "외국환은행", "국외지급", "국외송금", "외국환신고", "외화"],
-    "대외무역거래": ["대외무역", "무역거래", "무역법", "수출입", "원산지표시", "수출입신고", "수출신고", "수입신고", "통관", "무역관리"],
-    "환급": ["환급", "관세환급", "환급금", "관세 등 환급", "환급특례법", "수출용 원재료", "관세 환급", "소요량", "정산", "과다환급", "불복"]
-}
-
-# 불용어 정의
-LEGAL_STOPWORDS = [
-    # 기본 불용어
-    '제', '것', '등', '때', '경우', '바', '수', '점', '면', '이', '그', '저', '은', '는', '을', '를', '에', '의', '으로', 
-    '따라', '또는', '및', '있다', '한다', '되어', '인한', '대한', '관한', '위한', '통한', '같은', '다른',
-    
-    # 법령 구조 불용어
-    '조항', '규정', '법률', '법령', '조문', '항목', '세부', '내용', '사항', '요건', '기준', '방법', '절차',
-    
-    # 일반적인 동사/형용사
-    '해당', '관련', '포함', '제외', '적용', '시행', '준용', '의하다', '하다', '되다', '있다', '없다', '같다'
-]
-
-# PDF를 JSON 구조의 조문으로 변환하는 새 함수들
-
-def convert_pdf_to_json_articles(pdf_path: str) -> list[dict]:
-    """PDF 파일을 구조화된 조문 리스트(JSON)로 변환하는 메인 함수"""
-    try:
-        # 1. pdfminer를 사용하여 PDF에서 텍스트 추출
-        text = pdfminer_extract_text(pdf_path)
-        if not text:
-            print(f"경고: {pdf_path}에서 텍스트를 추출하지 못했습니다.")
-            return []
-
-        # 2. 텍스트를 조문별로 파싱
-        articles = _parse_text_to_articles(text)
-        if not articles:
-            print(f"경고: {pdf_path}에서 조문을 찾지 못했습니다.")
-            return []
-            
-        # 3. 조문 내용 정제 (불필요한 괄호 및 구조 표시어 제거)
-        refined_articles = _refine_articles(articles)
-        return refined_articles
-        
-    except Exception as e:
-        print(f"'{pdf_path}' 파일 변환 중 오류 발생: {e}")
-        return []
-
-def _parse_text_to_articles(text: str) -> list[dict]:
-    """추출된 텍스트를 '조/제목/내용' 구조로 파싱하는 함수"""
-    lines = text.splitlines()
-    articles = []
-    # "제X조(제목)" 패턴을 찾는 정규식
-    article_pattern = re.compile(r"^(제\d+(?:-\d+)?조(?:의\d+)?)\s*\((.*?)\)")
-    
-    current_article = None
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        match = article_pattern.match(line)
-        if match:
-            # 새로운 조문이 시작되면, 이전 조문을 리스트에 추가
-            if current_article:
-                articles.append(current_article)
-            
-            # 새 조문 정보 추출
-            number = match.group(1)
-            title = match.group(2)
-            content = line[match.end():].strip()
-            
-            current_article = {"조번호": number, "제목": title, "내용": content}
-        elif current_article:
-            # 현재 조문의 내용이 다음 줄로 이어지는 경우
-            current_article["내용"] += f"\n{line}"
-    
-    # 마지막 조문을 리스트에 추가
-    if current_article:
-        articles.append(current_article)
-        
-    return articles
-
-def _refine_articles(articles: list[dict]) -> list[dict]:
-    """조문 내용에서 불필요한 텍스트(장/절/관, 꺾쇠/대괄호)를 제거하는 함수"""
-    # "제X장", "제X절" 등 구조 표시어 제거를 위한 정규식
-    structure_pattern = re.compile(r"제\d+(장|절|관)")
-    
-    for article in articles:
-        content = article["내용"]
-        # <...> 또는 [...] 형태의 텍스트 제거
-        content = re.sub(r"<.*?>|\[.*?\]", "", content)
-        # 제X장, 제X절 등 구조 표시어 제거
-        content = structure_pattern.sub("", content).strip()
-        article["내용"] = content
-    return articles
-
-# 사용자 쿼리 전처리 및 유사어 생성 클래스 (새로 추가)
-class QueryPreprocessor:
-    """사용자 쿼리 전처리 및 유사어 생성 클래스"""
+class HSDataManager:
+    """
+    HS 코드 관련 데이터를 관리하는 클래스
+    - HS 분류 사례, 위원회 결정, 협의회 결정 등의 데이터를 로드하고 관리
+    - 키워드 기반 검색 기능 제공
+    - 관련 컨텍스트 생성 기능 제공
+    """
     
     def __init__(self):
-        # 첫 번째 파일에서 사용하던 모델을 그대로 활용합니다.
-        self.model = get_model() 
+        """HSDataManager 초기화"""
+        self.data = {}  # 모든 HS 관련 데이터를 저장하는 딕셔너리
+        self.search_index = defaultdict(list)  # 키워드 기반 검색을 위한 인덱스
+        self.load_all_data()  # 모든 데이터 파일 로드
+        self.build_search_index()  # 검색 인덱스 구축
+    
+    def load_all_data(self):
+        """
+        모든 HS 데이터 파일을 로드하는 메서드
+        - HS분류사례_part1~10.json 파일 로드
+        - HS위원회.json, HS협의회.json 파일 로드
+        - hs_classification_data_us.json 파일 로드 (미국 관세청 품목분류 사례)
+        - hs_classification_data_eu.json 파일 로드 (EU 관세청 품목분류 사례)
+        """
+        # HS분류사례 파트 로드 (1~10)
+        for i in range(1, 11):
+            try:
+                with open(f'knowledge/HS분류사례_part{i}.json', 'r', encoding='utf-8') as f:
+                    self.data[f'HS분류사례_part{i}'] = json.load(f)
+            except FileNotFoundError:
+                print(f'Warning: HS분류사례_part{i}.json not found')
         
-    def extract_keywords_and_synonyms(self, query: str) -> str:
-        """키워드 추출 및 유사어 생성"""
-        prompt = f"""
-당신은 대한민국 법령 전문가입니다. 다음 질문을 분석하여 검색에 도움이 되는 키워드와 유사어를 생성해주세요.
-
-질문: "{query}"
-
-다음 작업을 수행해주세요:
-1. 핵심 키워드 추출
-2. 각 키워드의 유사어, 동의어, 관련어 생성
-3. 복합어의 경우 단어 분리도 포함
-4. 검색에 유용한 모든 관련 단어들을 나열
-
-응답 형식: 키워드와 유사어들을 공백으로 구분하여 한 줄로 나열해주세요.
-예시: 관세조사 세액심사 관세법 세관장 세액 통관 사후심사
-
-단어들만 나열하고 다른 설명은 하지 마세요.
-"""
+        # 기타 JSON 파일 로드 (위원회, 협의회 결정)
+        other_files = ['knowledge/HS위원회.json', 'knowledge/HS협의회.json']
+        for file in other_files:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    self.data[file.replace('.json', '')] = json.load(f)
+            except FileNotFoundError:
+                print(f'Warning: {file} not found')
         
+        # 미국 관세청 품목분류 사례 로드
         try:
-            response = self.model.generate_content(prompt)
-            keywords_text = response.text.strip()
-            keywords = re.findall(r'[가-힣]{2,}', keywords_text)
-            return ' '.join(keywords)
-            
-        except Exception as e:
-            print(f"키워드 추출 오류: {e}")
-            fallback_keywords = re.findall(r'[가-힣]{2,}', query)
-            return ' '.join(fallback_keywords)
-    
-    def generate_similar_questions(self, original_query: str) -> list[str]:
-        """유사한 질문 생성"""
-        prompt = f"""
-다음 질문과 유사한 의미를 가진 질문들을 3개 생성해주세요. 
-법령 검색에 도움이 되도록 다양한 표현과 용어를 사용해주세요.
-
-원본 질문: "{original_query}"
-
-유사 질문 3개를 다음 형식으로 생성해주세요:
-1. (첫 번째 유사 질문)
-2. (두 번째 유사 질문)
-3. (세 번째 유사 질문)
-
-각 질문은 원본과 의미는 같지만 다른 표현이나 용어를 사용해주세요.
-"""
+            with open('knowledge/hs_classification_data_us.json', 'r', encoding='utf-8') as f:
+                self.data['hs_classification_data_us'] = json.load(f)
+        except FileNotFoundError:
+            print('Warning: hs_classification_data_us.json not found')
         
+        # EU 관세청 품목분류 사례 로드
         try:
-            response = self.model.generate_content(prompt)
-            questions = []
-            lines = response.text.strip().split('\n')
-            for line in lines:
-                match = re.search(r'^\d+\.\s*(.+)', line.strip())
-                if match:
-                    questions.append(match.group(1))
-            
-            return questions[:3]
-            
-        except Exception as e:
-            print(f"유사 질문 생성 오류: {e}")
-            return [original_query]
-
-
-def extract_text_from_pdf(pdf_path):
-    """
-    PDF 파일에서 텍스트를 추출하는 함수
-    """
-    text = ""
-    try:
-        with open(pdf_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-    except Exception as e:
-        print(f"Error processing {pdf_path}: {str(e)}")
-    return text
-
-# 임베딩 및 청크 생성
-@st.cache_data
-def create_embeddings_for_text(text, chunk_size=1000):
-    chunks = []
-    step = chunk_size // 2
-    for i in range(0, len(text), step):
-        segment = text[i:i+chunk_size]
-        if len(segment) > 100:
-            chunks.append(segment)
-    vectorizer = TfidfVectorizer(
-        ngram_range=(1, 2),
-        stop_words=LEGAL_STOPWORDS,
-        min_df=1,
-        max_df=0.8,
-        sublinear_tf=True,
-        use_idf=True,
-        smooth_idf=True,
-        norm='l2'
-    )
-    matrix = vectorizer.fit_transform(chunks)
-    return vectorizer, matrix, chunks
-
-# JSON 구조의 조문을 위한 임베딩 생성 함수 (새로 추가)
-@st.cache_data
-def create_embeddings_for_json(articles):
-    """JSON 형식의 조문 리스트로부터 TF-IDF 임베딩을 생성합니다."""
-    if not articles:
-        return None, None, []
+            with open('knowledge/hs_classification_data_eu.json', 'r', encoding='utf-8') as f:
+                self.data['hs_classification_data_eu'] = json.load(f)
+        except FileNotFoundError:
+            print('Warning: hs_classification_data_eu.json not found')
     
-    # 각 조문을 "조번호 (제목): 내용" 형식의 문자열로 변환하여 청크로 사용
-    chunks = [f"{article['조번호']} ({article['제목']}): {article['내용']}" for article in articles if article['내용']]
+    def build_search_index(self):
+        """
+        검색 인덱스 구축 메서드
+        - 각 데이터 항목에서 키워드를 추출
+        - 추출된 키워드를 인덱스에 저장하여 빠른 검색 가능
+        """
+        for source, items in self.data.items():
+            for item in items:
+                # 품목명에서 키워드 추출
+                keywords = self._extract_keywords(str(item))
+                # 각 키워드에 대해 해당 아이템 참조 저장
+                for keyword in keywords:
+                    self.search_index[keyword].append((source, item))
     
-    if not chunks:
-        return None, None, []
-
-    # TfidfVectorizer를 사용하여 벡터화 (기존과 동일)
-    vectorizer = TfidfVectorizer(
-        ngram_range=(1, 2),
-        stop_words=LEGAL_STOPWORDS,
-        min_df=1,
-        max_df=0.8,
-        sublinear_tf=True,
-        use_idf=True,
-        smooth_idf=True,
-        norm='l2'
-    )
-    matrix = vectorizer.fit_transform(chunks)
-    return vectorizer, matrix, chunks
-
-# 쿼리 유사 청크 검색 (수정)
-def search_relevant_chunks(query, expanded_keywords, vectorizer, tfidf_matrix, text_chunks, top_k=3, threshold=0.01):
-    """원본 쿼리와 확장된 키워드를 모두 사용하여 관련 청크 검색"""
+    def _extract_keywords(self, text: str) -> List[str]:
+        """
+        텍스트에서 의미있는 키워드를 추출하는 내부 메서드
+        Args:
+            text: 키워드를 추출할 텍스트
+        Returns:
+            추출된 키워드 리스트
+        """
+        # 특수문자 제거 및 공백 기준 분리
+        words = re.sub(r'[^\w\s]', ' ', text).split()
+        # 중복 제거 및 길이 2 이상인 단어만 선택
+        return list(set(word for word in words if len(word) >= 2))
     
-    # 원본 쿼리와 확장 키워드로 각각 검색 벡터 생성
-    search_queries = [query, expanded_keywords]
-    all_similarities = []
-
-    for search_query in search_queries:
-        q_vec = vectorizer.transform([search_query])
-        sims = cosine_similarity(q_vec, tfidf_matrix).flatten()
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        쿼리와 관련된 가장 연관성 높은 항목들을 검색하는 메서드
+        Args:
+            query: 검색할 쿼리 문자열
+            max_results: 반환할 최대 결과 수 (기본값: 5)
+        Returns:
+            검색 결과 리스트 (출처와 항목 정보 포함)
+        """
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
         
-        # 원본 쿼리에 가중치 부여
-        weight = 1.0 if search_query == query else 0.8
-        weighted_sims = sims * weight
+        # 각 키워드에 대해 매칭되는 항목 찾기
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                # 가중치 계산 (키워드 매칭 횟수 기반)
+                results[(source, str(item))] += 1
         
-        all_similarities.append(weighted_sims)
+        # 가중치 기준 정렬
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        
+        # 상위 결과만 반환
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
     
-    # 각 청크에 대해 가장 높은 유사도 점수를 선택
-    if all_similarities:
-        combined_sims = np.maximum.reduce(all_similarities)
-    else:
-        # 비상시 원본 쿼리로만 검색
-        combined_sims = cosine_similarity(vectorizer.transform([query]), tfidf_matrix).flatten()
-    
-    # 상위 결과 선택
-    indices = combined_sims.argsort()[-top_k:][::-1]
-    
-    selected_chunks = [text_chunks[i] for i in indices if combined_sims[i] > threshold]
-    
-    # 임계값을 넘는 결과가 없으면 상위 K개 반환
-    if not selected_chunks:
-        selected_chunks = [text_chunks[i] for i in indices[:top_k]]
-    
-    return "\n\n".join(selected_chunks)
+    def search_domestic_group(self, query: str, group_idx: int, max_results: int = 3) -> List[Dict[str, Any]]:
+        """국내 HS 분류 데이터 그룹별 검색 메서드"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
 
-# PDF 로드 및 임베딩 생성 함수 (수정)
-@st.cache_data
-def load_law_data(category=None):
-    law_data = {}
-    missing_files = []
-    
-    # 로드할 파일 목록 결정
-    if category:
-        pdf_files = LAW_CATEGORIES.get(category, {})
-    else:
-        pdf_files = {}
-        for cat_files in LAW_CATEGORIES.values():
-            pdf_files.update(cat_files)
+        # 그룹별 데이터 소스 정의 (5개 그룹)
+        group_sources = [
+            ['HS분류사례_part1', 'HS분류사례_part2'],  # 그룹1
+            ['HS분류사례_part3', 'HS분류사례_part4'],  # 그룹2
+            ['HS분류사례_part5', 'HS분류사례_part6'],  # 그룹3
+            ['HS분류사례_part7', 'HS분류사례_part8'],  # 그룹4
+            ['HS분류사례_part9', 'HS분류사례_part10', 'knowledge/HS위원회', 'knowledge/HS협의회']  # 그룹5
+        ]
+        sources = group_sources[group_idx]
 
-    for law_name, pdf_path in pdf_files.items():
-        if os.path.exists(pdf_path):
-            # 현재 법령의 카테고리 확인
-            current_category = category
-            if not current_category:
-                for cat, laws in LAW_CATEGORIES.items():
-                    if law_name in laws:
-                        current_category = cat
-                        break
-            
-            # --- 카테고리에 따른 분기 처리 ---
-            if current_category == "관세평가":
-                # '관세평가'는 기존 방식(일반 텍스트 추출) 사용
-                text = extract_text_from_pdf(pdf_path)
-                law_data[law_name] = text
-                vec, mat, chunks = create_embeddings_for_text(text)
-                if vec is not None:
-                    st.session_state.embedding_data[law_name] = (vec, mat, chunks)
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                if source in sources:
+                    results[(source, str(item))] += 1
+
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+
+    def get_domestic_context_group(self, query: str, group_idx: int) -> str:
+        """국내 HS 분류 관련 컨텍스트(그룹별)를 생성하는 메서드"""
+        results = self.search_domestic_group(query, group_idx)
+        context = []
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        return "\n\n".join(context)
+
+    def search_overseas_group(self, query: str, group_idx: int, max_results: int = 3) -> List[Dict[str, Any]]:
+        """해외 HS 분류 데이터 그룹별 검색 메서드"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 해외 데이터를 그룹별로 분할 처리
+        if group_idx < 3:  # 그룹 0,1,2는 미국 데이터
+            target_source = 'hs_classification_data_us'
+            # 미국 데이터를 3등분
+            us_data = self.data.get(target_source, [])
+            chunk_size = len(us_data) // 3
+            start_idx = group_idx * chunk_size
+            end_idx = start_idx + chunk_size if group_idx < 2 else len(us_data)
+            target_items = us_data[start_idx:end_idx]
+        else:  # 그룹 3,4는 EU 데이터
+            target_source = 'hs_classification_data_eu'
+            # EU 데이터를 2등분
+            eu_data = self.data.get(target_source, [])
+            chunk_size = len(eu_data) // 2
+            eu_group_idx = group_idx - 3  # 0 or 1
+            start_idx = eu_group_idx * chunk_size
+            end_idx = start_idx + chunk_size if eu_group_idx < 1 else len(eu_data)
+            target_items = eu_data[start_idx:end_idx]
+        
+        # 해당 그룹 데이터에서만 검색
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                if source == target_source and item in target_items:
+                    results[(source, str(item))] += 1
+        
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+
+    def get_overseas_context_group(self, query: str, group_idx: int) -> str:
+        """해외 HS 분류 관련 컨텍스트(그룹별)를 생성하는 메서드"""
+        results = self.search_overseas_group(query, group_idx)
+        context = []
+        
+        for result in results:
+            # 출처에 따라 국가 구분
+            if result['source'] == 'hs_classification_data_us':
+                country = "미국 관세청"
+            elif result['source'] == 'hs_classification_data_eu':
+                country = "EU 관세청"
             else:
-                # 나머지 카테고리는 새로운 방식(JSON 구조화) 사용
-                articles = convert_pdf_to_json_articles(pdf_path)
-                if articles:
-                    law_data[law_name] = articles  # JSON 데이터를 저장
-                    vec, mat, chunks = create_embeddings_for_json(articles)
-                    if vec is not None:
-                        st.session_state.embedding_data[law_name] = (vec, mat, chunks)
-                else:
-                    # JSON 변환 실패 시, 기존 방식으로 대체 처리
-                    st.warning(f"'{law_name}' 파일의 구조 분석에 실패하여 일반 텍스트로 처리합니다.")
-                    text = extract_text_from_pdf(pdf_path)
-                    law_data[law_name] = text
-                    vec, mat, chunks = create_embeddings_for_text(text)
-                    if vec is not None:
-                        st.session_state.embedding_data[law_name] = (vec, mat, chunks)
-        else:
-            missing_files.append(pdf_path)
-
-    if missing_files:
-        st.warning(f"다음 파일들을 찾을 수 없습니다: {', '.join(missing_files)}")
-    return law_data
-
-# Gemini 모델 반환
-def get_model():
-    return genai.GenerativeModel('gemini-2.0-flash')
-
-def get_model_head():
-    return genai.GenerativeModel('gemini-2.5-flash')
-
-# 질문 카테고리 분류 함수 추가
-def classify_question_category(question):
-    prompt = f"""
-당신은 법령 전문가로서 사용자의 질문을 분석하여 가장 관련성 높은 법령 카테고리를 선택하는 업무를 담당합니다.
-
-다음은 사용자의 질문입니다:
-"{question}"
-
-아래 법령 카테고리 중에서 이 질문과 가장 관련성이 높은 카테고리 하나만 선택해주세요:
-
-1. 관세조사: 관세법, 관세법 시행령, 관세법 시행규칙, 관세평가 운영에 관한 고시, 관세조사 운영에 관한 훈령 등 관련
-2. 관세평가: WTO관세평가협정, 관세와무역에관한일반협정제7조, 권고의견, 사례연구 등 관련
-3. 자유무역협정: FTA, 원산지증명서, 원산지인증, 원산지조사, 특례법 등 관련
-4. 외국환거래: 외국환거래법, 외국환거래법 시행령, 외국환거래규정 등 관련
-5. 대외무역거래: 대외무역법, 대외무역법 시행령, 대외무역관리규정, 원산지표시제도 등 관련
-6. 환급: 환급특례법, 환급특례법 시행령, 환급특례법 시행규칙, 관세 등 환급 관련
-
-반드시 위의 카테고리 중 하나만 선택하고, 다음 형식으로만 답변해주세요:
-"카테고리: [선택한 카테고리명]"
-
-예를 들어, "카테고리: 관세조사"와 같이 답변해주세요.
-"""
-    model = get_model()
-    response = model.generate_content(prompt)
-    # 응답에서 카테고리 추출
-    response_text = response.text
-    if "카테고리:" in response_text:
-        category = response_text.split("카테고리:")[1].strip()
-        # 카테고리명만 정확히 추출
-        for cat in LAW_CATEGORIES.keys():
-            if cat in category:
-                return cat
-    # 분류가 명확하지 않은 경우 기본 카테고리 반환
-    return "관세조사"  # 기본 카테고리로 설정
-
-# 법령별 에이전트 응답 (async) (수정)
-async def get_law_agent_response_async(law_name, question, history, expanded_keywords):
-    # 임베딩 데이터가 없으면 생성
-    if law_name not in st.session_state.embedding_data:
-        law_data = st.session_state.law_data.get(law_name, "")
+                country = "해외 관세청"
+                
+            context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
         
-        # 데이터 타입에 따라 적절한 임베딩 함수 호출
-        if isinstance(law_data, list):  # JSON 형식 (조문 리스트)
-            vec, mat, chunks = create_embeddings_for_json(law_data)
-        else:  # 텍스트 형식
-            vec, mat, chunks = create_embeddings_for_text(law_data)
-            
-        st.session_state.embedding_data[law_name] = (vec, mat, chunks)
-    else:
-        vec, mat, chunks = st.session_state.embedding_data[law_name]
-
-    # 수정된 검색 함수 호출
-    context = search_relevant_chunks(question, expanded_keywords, vec, mat, chunks) 
-
-    # 이하 prompt 부분은 기존과 동일합니다.
-    prompt = f"""
-당신은 대한민국 {law_name} 법률 전문가입니다.
-
-아래는 질문과 관련된 법령 내용입니다. 반드시 다음 법령 내용을 기반으로 질문에 답변해주세요:
-{context}
-
-이전 대화:
-{history}
-
-질문: {question}
-
-# 응답 지침
-1. 제공된 법령 정보에 기반하여 정확하게 답변해주세요.
-2. 답변에 사용한 모든 법령 출처(법령명, 조항)를 명확히 인용해주세요.
-3. 법령에 명시되지 않은 내용은 추측하지 말고, 알 수 없다고 정직하게 답변해주세요.
-
-"""
-    model = get_model()
-    loop = st.session_state.event_loop
-    with ThreadPoolExecutor() as pool:
-        res = await loop.run_in_executor(pool, lambda: model.generate_content(prompt))
-    return law_name, res.text
-
-# 모든 에이전트 병렬 실행 (수정)
-async def gather_agent_responses(question, history):
-    # 1. QueryPreprocessor를 사용하여 질문 분석 및 키워드 생성
-    preprocessor = QueryPreprocessor()
+        return "\n\n".join(context)
     
-    similar_questions = preprocessor.generate_similar_questions(question)
-    combined_query_text = " ".join([question] + similar_questions)
-    expanded_keywords = preprocessor.extract_keywords_and_synonyms(combined_query_text)
+    def search_domestic(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """국내 HS 분류 데이터에서만 검색하는 메서드"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 국내 데이터 소스만 필터링
+        domestic_sources = [
+            'HS분류사례_part1', 'HS분류사례_part2', 'HS분류사례_part3', 'HS분류사례_part4', 'HS분류사례_part5',
+            'HS분류사례_part6', 'HS분류사례_part7', 'HS분류사례_part8', 'HS분류사례_part9', 'HS분류사례_part10',
+            'knowledge/HS위원회', 'knowledge/HS협의회'
+        ]
+        
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                # 국내 데이터 소스만 포함
+                if source in domestic_sources:
+                    results[(source, str(item))] += 1
+        
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+    
+    def get_domestic_context(self, query: str) -> str:
+        """국내 HS 분류 관련 컨텍스트를 생성하는 메서드"""
+        results = self.search_domestic(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+    
+    def search_overseas_improved(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """해외 HS 분류 데이터에서만 검색하는 개선된 메서드 (search_index 활용)"""
+        query_keywords = self._extract_keywords(query)
+        results = defaultdict(int)
+        
+        # 해외 데이터 소스만 필터링
+        overseas_sources = ['hs_classification_data_us', 'hs_classification_data_eu']
+        
+        for keyword in query_keywords:
+            for source, item in self.search_index.get(keyword, []):
+                # 해외 데이터 소스만 포함
+                if source in overseas_sources:
+                    results[(source, str(item))] += 1
+        
+        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+        
+        return [
+            {'source': source, 'item': eval(item_str)}
+            for (source, item_str), _ in sorted_results[:max_results]
+        ]
+    
+    def get_domestic_context(self, query: str) -> str:
+        """국내 HS 분류 관련 컨텍스트를 생성하는 메서드"""
+        results = self.search_domestic(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
 
-    # 디버깅 또는 확인용으로 화면에 출력할 수 있습니다.
-    # st.info(f"유사 질문: {similar_questions}")
-    # st.info(f"확장 키워드: {expanded_keywords}")
 
-    # 2. 각 에이전트에게 '확장된 키워드'를 전달하여 병렬 실행
-    tasks = [get_law_agent_response_async(name, question, history, expanded_keywords) # expanded_keywords 전달
-             for name in st.session_state.law_data]
-    return await asyncio.gather(*tasks)
+    def get_relevant_context(self, query: str) -> str:
+        """
+        쿼리에 관련된 컨텍스트를 생성하는 메서드
+        Args:
+            query: 컨텍스트를 생성할 쿼리 문자열
+        Returns:
+            관련 컨텍스트 문자열 (출처와 항목 정보 포함)
+        """
+        results = self.search(query)
+        context = []
+        
+        for result in results:
+            context.append(f"출처: {result['source']}\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
+    
+    def get_overseas_context_improved(self, query: str) -> str:
+        """해외 HS 분류 관련 컨텍스트를 생성하는 개선된 메서드"""
+        results = self.search_overseas_improved(query)
+        context = []
+        
+        for result in results:
+            # 출처에 따라 국가 구분
+            if result['source'] == 'hs_classification_data_us':
+                country = "미국 관세청"
+            elif result['source'] == 'hs_classification_data_eu':
+                country = "EU 관세청"
+            else:
+                country = "해외 관세청"
+                
+            context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
+        
+        return "\n\n".join(context)
 
-# 헤드 에이전트 통합 답변
-def get_head_agent_response(responses, question, history):
-    combined = "\n\n".join([f"=== {n} 전문가 답변 ===\n{r}" for n, r in responses])
-    prompt = f"""
-당신은 관세, 외국환거래, 대외무역법 분야 전문성을 갖춘 법학 교수이자 여러 자료를 통합하여 종합적인 답변을 제공하는 전문가입니다.
+# HTML 태그 제거 및 텍스트 정제 함수
+def clean_text(text):
+    # HTML 태그 제거 (더 엄격한 정규식 패턴 사용)
+    text = re.sub(r'<[^>]+>', '', text)  # 모든 HTML 태그 제거
+    text = re.sub(r'\s*</div>\s*$', '', text)  # 끝에 있는 </div> 태그 제거
+    return text.strip()
 
-{combined}
+# HS 코드 추출 패턴 정의 및 함수
+# 더 유연한 HS 코드 추출 패턴
+HS_PATTERN = re.compile(
+    r'(?:HS\s*)?(\d{4}(?:[.-]?\d{2}(?:[.-]?\d{2}(?:[.-]?\d{2})?)?)?)',
+    flags=re.IGNORECASE
+)
 
-이전 대화:
-{history}
+def extract_hs_codes(text):
+    """
+    여러 HS 코드를 추출하고, 중복 제거 및 숫자만 남겨 표준화
+    개선사항:
+    - 단어 경계(\b) 제거로 더 유연한 매칭
+    - 숫자만 있는 경우도 처리 가능
+    - 최소 4자리 숫자 체크 추가
+    """
+    matches = HS_PATTERN.findall(text)
+    hs_codes = []
+    
+    for raw in matches:
+        # 숫자만 남기기
+        code = re.sub(r'\D', '', raw)
+        # 최소 4자리이고 중복이 아닌 경우만 추가
+        if len(code) >= 4 and code not in hs_codes:
+            hs_codes.append(code)
+    
+    # 만약 위 패턴으로 찾지 못하고, 입력이 4자리 이상의 숫자로만 구성된 경우
+    if not hs_codes:
+        # 순수 숫자만 있는 경우 체크
+        numbers_only = re.findall(r'\d{4,}', text)
+        for num in numbers_only:
+            if num not in hs_codes:
+                hs_codes.append(num)
+    
+    return hs_codes
 
-질문: {question}
+def extract_and_store_text(json_file):
+    """JSON 파일에서 head1과 text를 추출하여 변수에 저장"""
+    try:
+        # JSON 파일 읽기
+        with open(json_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+        
+        # 데이터를 변수에 저장
+        extracted_data = []
+        for item in data:
+            head1 = item.get('head1', '')
+            text = item.get('text', '')
+            if head1 or text:
+                extracted_data.append(f"{head1}\n{text}")
+        
+        return extracted_data
+    except Exception as e:
+        print(f"오류 발생: {e}")
+        return []
 
-# 응답 지침
-1 여러 에이전트로부터 받은 답변을 분석하고 통합하여 사용자의 질문에 가장 적합한 최종 답변을 제공합니다.
-2. 제공된 법령 정보에 기반하여 정확하게 답변해주세요.
-3. 답변에 사용한 모든 법령 출처(법령명, 조항)를 명확히 인용해주세요.
-4. 법령에 명시되지 않은 내용은 추측하지 말고, 알 수 없다고 정직하게 답변해주세요.
-5. 모든 답변은 두괄식으로 작성합니다.
+# 통칙 데이터 로드 (재사용을 위한 전역 변수)
+general_explanation = extract_and_store_text('knowledge/통칙_grouped.json')
 
-"""
-    return get_model_head().generate_content(prompt).text
+def lookup_hscode(hs_code, json_file):
+    """HS 코드에 대한 해설 정보를 조회하는 함수"""
+    try:
+        with open(json_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+        
+        # 각 설명 유형별 초기값 설정
+        part_explanation = {"text": "해당 부에 대한 설명을 찾을 수 없습니다."}
+        chapter_explanation = {"text": "해당 류에 대한 설명을 찾을 수 없습니다."}
+        sub_explanation = {"text": "해당 호에 대한 설명을 찾을 수 없습니다."}
+
+        # 1) 류(類) key: "제00류"
+        chapter_key = f"제{int(hs_code[:2])}류"
+        chapter_explanation = next((g for g in data if g.get('header2') == chapter_key), chapter_explanation)
+
+        # 2) 호 key: "00.00"
+        sub_key = f"{hs_code[:2]}.{hs_code[2:]}"
+        sub_explanation = next((g for g in data if g.get('header2') == sub_key), sub_explanation)
+
+        # 3) 부(部) key: "제00부"
+        part_key = chapter_explanation.get('header1') if chapter_explanation else None
+        part_explanation = next((g for g in data if (g.get('header1') == part_key)&(re.sub(r'제\s*(\d+)\s*부', r'제\1부', g.get('header1')) == part_key)), None)
+        
+        return part_explanation, chapter_explanation, sub_explanation
+    
+    except Exception as e:
+        print(f"HS 코드 조회 오류: {e}")
+        return ({"text": "오류가 발생했습니다."}, {"text": "오류가 발생했습니다."}, {"text": "오류가 발생했습니다."})
+
+def get_hs_explanations(hs_codes):
+    """여러 HS 코드에 대한 해설을 취합하는 함수 (마크다운 형식)"""
+    all_explanations = ""
+    for hs_code in hs_codes:
+        explanation, type_explanation, number_explanation = lookup_hscode(hs_code, 'knowledge/grouped_11_end.json')
+
+        if explanation and type_explanation and number_explanation:
+            all_explanations += f"\n\n# HS 코드 {hs_code} 해설\n\n"
+            all_explanations += f"## 📋 해설서 통칙\n\n"
+            
+            # 통칙 내용을 리스트 형태로 정리
+            if general_explanation:
+                for i, rule in enumerate(general_explanation[:5], 1):  # 처음 5개만 표시
+                    all_explanations += f"### 통칙 {i}\n{rule}\n\n"
+            
+            all_explanations += f"## 📂 부(部) 해설\n\n{explanation['text']}\n\n"
+            all_explanations += f"## 📚 류(類) 해설\n\n{type_explanation['text']}\n\n"
+            all_explanations += f"## 📝 호(號) 해설\n\n{number_explanation['text']}\n\n"
+            all_explanations += "---\n"  # 구분선 추가
+    
+    return all_explanations
+
+# 질문 유형 분류 함수 (LLM 기반)
+def classify_question(user_input):
+    """
+    LLM(Gemini)을 활용하여 사용자의 질문을 아래 네 가지 유형 중 하나로 분류합니다.
+    - 'web_search': 물품 개요, 용도, 기술개발, 무역동향, 산업동향 등
+    - 'hs_classification': HS 코드, 품목분류, 관세 등
+    - 'hs_manual': HS 해설서 본문 심층 분석
+    - 'overseas_hs': 해외(미국/EU) HS 분류 사례
+    """
+    system_prompt = """
+아래는 HS 품목분류 전문가를 위한 질문 유형 분류 기준입니다.
+
+질문 유형:
+1. "web_search" : "뉴스", "최근", "동향", "해외", "산업, 기술, 무역동향" 등 일반 정보 탐색이 필요한 경우.
+2. "hs_classification": HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
+3. "hs_manual": HS 해설서 본문 심층 분석이 필요한 경우.
+4. "overseas_hs": "미국", "해외", "외국", "US", "America", "EU", "유럽" 등 해외 HS 분류 사례가 필요한 경우.
+5. "hs_manual_raw": HS 코드만 입력하여 해설서 원문을 보고 싶은 경우.
+
+아래 사용자 질문을 읽고, 반드시 위 다섯 가지 중 하나의 유형만 한글이 아닌 소문자 영문으로 답변하세요.
+질문: """ + user_input + """\n답변:"""
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash", # 또는 최신 모델로 변경 가능
+        contents=system_prompt,
+        )
+    answer = response.text.strip().lower()
+    # 결과가 정확히 네 가지 중 하나인지 확인
+    if answer in ["web_search", "hs_classification", "hs_manual", "overseas_hs", "hs_manual_raw"]:
+        return answer
+    # 예외 처리: 분류 실패 시 기본값
+    return "hs_classification"
+
+# 질문 유형별 처리 함수
+def handle_web_search(user_input, context, hs_manager):
+    # 웹검색 전용 컨텍스트로 수정
+    web_context = """당신은 HS 품목분류 전문가입니다. 
+사용자의 질문에 대해 최신 웹 정보를 검색하여 물품개요, 용도, 기술개발, 무역동향, 산업동향 등의 정보를 제공해주세요.
+국내 HS 분류 사례가 아닌 일반적인 시장 정보와 동향을 중심으로 답변해주세요."""
+    
+    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    config = types.GenerateContentConfig(tools=[grounding_tool])
+    
+    prompt = f"{web_context}\n\n사용자: {user_input}\n"
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=config)
+    
+    return clean_text(response.text)
+
+def summarize_prompt_if_needed(prompt, max_length=10000):
+
+    """
+    프롬프트 길이에 따라 처리 방식 결정
+    - 5000자 이하: 그대로 사용
+    - 5000자 이상: LLM으로 요약
+    """
+    prompt_length = len(prompt)
+
+    if prompt_length <= max_length:
+        return prompt
+    else:
+        
+        print(f"프롬프트 길이 {prompt_length}자 -> 10000자로 자르기")
+        return prompt[:max_length] + "...(내용 일부 생략)"
+
+
+
+def handle_hs_classification_cases(user_input, context, hs_manager):
+    """국내 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
+    group_answers = []
+    for i in range(5):
+        try:
+            relevant = hs_manager.get_domestic_context_group(user_input, i)
+            
+            if not relevant or relevant.strip() == "":
+                group_answers.append(f"그룹{i+1}에서 관련 데이터를 찾을 수 없습니다.")
+                continue
+                
+            prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+            
+            # 프롬프트 요약 적용
+            prompt = summarize_prompt_if_needed(prompt)
+            
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            group_answers.append(clean_text(response.text))
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"그룹{i+1} 처리 중 오류: {str(e)}")
+            group_answers.append(f"그룹{i+1} 처리 중 오류가 발생했습니다.")
+
+    # Head Agent 처리
+    try:
+        head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+        for idx, ans in enumerate(group_answers):
+            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+        head_prompt += f"\n사용자: {user_input}\n"
+        
+        # Head Agent 프롬프트도 요약 적용
+        head_prompt = summarize_prompt_if_needed(head_prompt, max_length=3000)
+        
+        head_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=head_prompt
+        )
+        return clean_text(head_response.text)
+        
+    except Exception as e:
+        logger.error(f"Head Agent 처리 중 오류: {str(e)}")
+        return "\n\n".join([f"그룹{i+1}: {ans}" for i, ans in enumerate(group_answers)])
+
+def handle_hs_manual(user_input, context, hs_manager):
+    # 예: HS 해설서 분석 전용 컨텍스트 추가
+    manual_context = context + "\n(심층 해설서 분석 모드)"
+    hs_codes = extract_hs_codes(user_input)
+    explanations = get_hs_explanations(hs_codes) if hs_codes else ""
+    prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
+    # client.models.generate_content 사용
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", # 모델명 단순화
+        contents=prompt
+    )
+    return clean_text(response.text)
+
+def handle_overseas_hs(user_input, context, hs_manager):
+    """해외 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
+    overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
+    
+    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
+    group_answers = []
+    for i in range(5):
+        try:
+            relevant = hs_manager.get_overseas_context_group(user_input, i)
+            
+            if not relevant or relevant.strip() == "":
+                group_answers.append(f"그룹{i+1}에서 관련 데이터를 찾을 수 없습니다.")
+                continue
+                
+            prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+            
+            # 프롬프트 길이 체크 및 요약
+            prompt = summarize_prompt_if_needed(prompt)
+            
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            group_answers.append(clean_text(response.text))
+            
+            # API 호출 간격 추가
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"그룹{i+1} 처리 중 오류: {str(e)}")
+            group_answers.append(f"그룹{i+1} 처리 중 오류가 발생했습니다.")
+
+    # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
+    try:
+        head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+        
+        for idx, ans in enumerate(group_answers):
+            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+        head_prompt += f"\n사용자: {user_input}\n"
+        
+        # Head Agent 프롬프트도 요약 적용
+        head_prompt = summarize_prompt_if_needed(head_prompt, max_length=3000)
+        
+        head_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=head_prompt
+        )
+        return clean_text(head_response.text)
+        
+    except Exception as e:
+        logger.error(f"Head Agent 처리 중 오류: {str(e)}")
+        return "\n\n".join([f"그룹{i+1}: {ans}" for i, ans in enumerate(group_answers)])
