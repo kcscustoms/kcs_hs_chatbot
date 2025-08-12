@@ -2,8 +2,10 @@ import json
 import re
 import os
 import requests
+import time
 from typing import Dict, List, Any
 from collections import defaultdict
+from difflib import SequenceMatcher
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -427,6 +429,321 @@ def get_hs_explanations(hs_codes):
             all_explanations += "---\n"  # 구분선 추가
     
     return all_explanations
+
+class TariffTableSearcher:
+    def __init__(self):
+        self.tariff_data = []
+        self.load_tariff_table()
+    
+    def load_tariff_table(self):
+        """관세율표 데이터 로드"""
+        try:
+            with open('knowledge/hstable.json', 'r', encoding='utf-8') as f:
+                self.tariff_data = json.load(f)
+        except FileNotFoundError:
+            print("Warning: hstable.json not found")
+            self.tariff_data = []
+    
+    def calculate_similarity(self, query, text):
+        """텍스트 유사도 계산"""
+        if not query or not text:
+            return 0.0
+        return SequenceMatcher(None, query.lower(), text.lower()).ratio()
+    
+    def search_by_tariff_table(self, query, top_n=10):
+        """관세율표에서 유사도 기반 HS코드 후보 검색"""
+        candidates = []
+        
+        for item in self.tariff_data:
+            hs_code = item.get('품목번호', '')
+            korean_name = item.get('한글품명', '')
+            english_name = item.get('영문품명', '')
+            
+            # 한글품명과 영문품명에서 유사도 계산
+            korean_sim = self.calculate_similarity(query, korean_name)
+            english_sim = self.calculate_similarity(query, english_name)
+            
+            # 최고 유사도 사용
+            max_similarity = max(korean_sim, english_sim)
+            
+            if max_similarity > 0.1:  # 최소 임계값
+                candidates.append({
+                    'hs_code': hs_code,
+                    'korean_name': korean_name,
+                    'english_name': english_name,
+                    'similarity': max_similarity,
+                    'matched_field': 'korean' if korean_sim > english_sim else 'english'
+                })
+        
+        # 유사도 순으로 정렬하여 상위 N개 반환
+        candidates.sort(key=lambda x: x['similarity'], reverse=True)
+        return candidates[:top_n]
+
+class ParallelHSSearcher:
+    def __init__(self, hs_manager):
+        self.hs_manager = hs_manager
+        self.tariff_searcher = TariffTableSearcher()
+    
+    def parallel_search(self, query, logger):
+        """병렬적 HS코드 검색"""
+        
+        # 경로 1: 관세율표 → 해설서 (2단계)
+        logger.log_actual("SEARCH", "Path 1: Tariff Table → Manual search starting...")
+        path1_results = self.tariff_to_manual_search(query, logger)
+        
+        # 경로 2: 해설서 직접 검색 (기존 방법)
+        logger.log_actual("SEARCH", "Path 2: Direct manual search starting...")
+        path2_results = self.direct_manual_search(query, logger)
+        
+        # 결과 종합
+        logger.log_actual("AI", "Consolidating parallel search results...")
+        final_results = self.consolidate_results(path1_results, path2_results, logger)
+        
+        return final_results
+    
+    def tariff_to_manual_search(self, query, logger):
+        """경로 1: 관세율표 → 해설서"""
+        # 1단계: 관세율표에서 HS코드 후보 선정
+        tariff_start = time.time()
+        hs_candidates = self.tariff_searcher.search_by_tariff_table(query, top_n=15)
+        tariff_time = time.time() - tariff_start
+        
+        logger.log_actual("DATA", f"Tariff table search completed", 
+                         f"{len(hs_candidates)} candidates in {tariff_time:.2f}s")
+        
+        if not hs_candidates:
+            return []
+            
+        # 상위 후보들의 HS코드 리스트 생성
+        candidate_codes = [item['hs_code'] for item in hs_candidates[:10]]
+        logger.log_actual("INFO", f"Top HS candidates from tariff", 
+                         f"{', '.join(candidate_codes[:5])}...")
+        
+        # 2단계: 해당 HS코드들을 해설서에서 검색
+        manual_start = time.time()
+        manual_results = []
+        
+        for candidate in hs_candidates[:10]:
+            hs_code = candidate['hs_code']
+            # 해설서에서 해당 HS코드 관련 내용 검색
+            manual_content = self.search_manual_by_hs_code(hs_code, query)
+            if manual_content:
+                manual_results.append({
+                    'hs_code': hs_code,
+                    'tariff_similarity': candidate['similarity'],
+                    'tariff_name': candidate['korean_name'],
+                    'manual_content': manual_content,
+                    'source': 'tariff_to_manual'
+                })
+        
+        manual_time = time.time() - manual_start
+        logger.log_actual("SUCCESS", f"Manual search for candidates completed", 
+                         f"{len(manual_results)} results in {manual_time:.2f}s")
+        
+        return manual_results
+    
+    def search_manual_by_hs_code(self, hs_code, query):
+        """특정 HS코드에 대한 해설서 내용 검색"""
+        try:
+            explanation, type_explanation, number_explanation = lookup_hscode(hs_code, 'knowledge/grouped_11_end.json')
+            
+            content = ""
+            if explanation and explanation.get('text'):
+                content += f"부 해설: {explanation['text']}\n"
+            if type_explanation and type_explanation.get('text'):
+                content += f"류 해설: {type_explanation['text']}\n"
+            if number_explanation and number_explanation.get('text'):
+                content += f"호 해설: {number_explanation['text']}\n"
+                
+            return content if content else None
+        except:
+            return None
+    
+    def direct_manual_search(self, query, logger):
+        """경로 2: 해설서 직접 검색 (기존 방법)"""
+        manual_start = time.time()
+        
+        # 기존 multi-agent 방식 활용
+        direct_results = []
+        for i in range(5):  # 5개 그룹 검색
+            group_results = self.hs_manager.search_domestic_group(query, i, max_results=2)
+            for result in group_results:
+                direct_results.append({
+                    'source_group': i,
+                    'content': result,
+                    'source': 'direct_manual'
+                })
+        
+        manual_time = time.time() - manual_start
+        logger.log_actual("SUCCESS", f"Direct manual search completed", 
+                         f"{len(direct_results)} results in {manual_time:.2f}s")
+        
+        return direct_results
+    
+    def extract_hs_codes_from_content(self, content):
+        """해설서 내용에서 HS코드 추출"""
+        if isinstance(content, dict):
+            text_content = json.dumps(content, ensure_ascii=False)
+        else:
+            text_content = str(content)
+            
+        # HS코드 패턴 추출
+        codes = extract_hs_codes(text_content)
+        return codes[:3]  # 최대 3개만
+    
+    def consolidate_results(self, path1_results, path2_results, logger):
+        """두 경로의 결과를 종합"""
+        consolidation_start = time.time()
+        
+        # 가중치 설정
+        TARIFF_WEIGHT = 0.4  # 관세율표 경로 가중치
+        MANUAL_WEIGHT = 0.6  # 해설서 직접 경로 가중치
+        
+        final_scores = defaultdict(float)
+        result_details = {}
+        
+        # 경로 1 결과 처리 (관세율표 → 해설서)
+        for result in path1_results:
+            hs_code = result['hs_code']
+            # 관세율표 유사도 * 가중치
+            score = result['tariff_similarity'] * TARIFF_WEIGHT
+            final_scores[hs_code] += score
+            
+            if hs_code not in result_details:
+                result_details[hs_code] = {
+                    'hs_code': hs_code,
+                    'tariff_name': result.get('tariff_name', ''),
+                    'manual_content': result.get('manual_content', ''),
+                    'path1_score': score,
+                    'path2_score': 0,
+                    'sources': ['tariff_to_manual']
+                }
+            else:
+                result_details[hs_code]['sources'].append('tariff_to_manual')
+        
+        # 경로 2 결과 처리 (해설서 직접)
+        for result in path2_results:
+            # HS코드 추출 로직 (해설서 내용에서)
+            extracted_codes = self.extract_hs_codes_from_content(result['content'])
+            
+            for hs_code in extracted_codes:
+                # 해설서 직접 검색 점수 (빈도 기반)
+                score = 0.5 * MANUAL_WEIGHT  # 기본 점수
+                final_scores[hs_code] += score
+                
+                if hs_code not in result_details:
+                    result_details[hs_code] = {
+                        'hs_code': hs_code,
+                        'tariff_name': '',
+                        'manual_content': str(result['content']),
+                        'path1_score': 0,
+                        'path2_score': score,
+                        'sources': ['direct_manual']
+                    }
+                else:
+                    result_details[hs_code]['path2_score'] += score
+                    if 'direct_manual' not in result_details[hs_code]['sources']:
+                        result_details[hs_code]['sources'].append('direct_manual')
+        
+        # 최종 순위 정렬
+        sorted_results = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        consolidation_time = time.time() - consolidation_start
+        logger.log_actual("SUCCESS", f"Results consolidation completed", 
+                         f"{len(sorted_results)} unique HS codes in {consolidation_time:.2f}s")
+        
+        # 상위 5개 결과 반환
+        top_results = []
+        for hs_code, final_score in sorted_results[:5]:
+            if hs_code in result_details:
+                details = result_details[hs_code]
+                details['final_score'] = final_score
+                details['confidence'] = 'HIGH' if len(details['sources']) > 1 else 'MEDIUM'
+                top_results.append(details)
+        
+        return top_results
+    
+    def create_enhanced_context(self, search_results):
+        """검색 결과를 컨텍스트로 변환"""
+        context = ""
+        
+        for i, result in enumerate(search_results, 1):
+            context += f"\n=== 후보 {i}: HS코드 {result['hs_code']} ===\n"
+            context += f"신뢰도: {result['confidence']}\n"
+            context += f"최종점수: {result['final_score']:.3f}\n"
+            
+            if result['tariff_name']:
+                context += f"관세율표 품목명: {result['tariff_name']}\n"
+            
+            context += f"검색경로: {', '.join(result['sources'])}\n"
+            
+            if result['manual_content']:
+                context += f"해설서 내용:\n{result['manual_content'][:500]}...\n"
+            
+            context += "\n"
+        
+        return context
+
+def handle_hs_manual_with_parallel_search(user_input, context, hs_manager, logger):
+    """병렬 검색을 활용한 HS 해설서 분석"""
+    
+    # 병렬 검색 수행
+    parallel_searcher = ParallelHSSearcher(hs_manager)
+    search_results = parallel_searcher.parallel_search(user_input, logger)
+    
+    # 결과를 컨텍스트로 변환
+    enhanced_context = parallel_searcher.create_enhanced_context(search_results)
+    
+    logger.log_actual("INFO", f"Enhanced context prepared", f"{len(enhanced_context)} chars")
+    
+    # Gemini에 전달할 프롬프트 구성
+    prompt = f"""{context}
+
+[병렬 검색 결과]
+{enhanced_context}
+
+사용자 질문: {user_input}
+
+위의 병렬 검색 결과를 바탕으로 다음을 포함하여 답변해주세요:
+
+1. **가장 적합한 HS 코드 추천**
+   - 최고 신뢰도의 HS코드와 그 근거
+   - 관세율표 품목명과 해설서 설명 종합
+
+2. **분류 근거 및 분석**
+   - 관세율표 기반 검색 결과
+   - 해설서 기반 검색 결과
+   - 두 검색 경로의 일치성 분석
+
+3. **신뢰도 평가**
+   - HIGH: 두 검색 경로 모두에서 발견
+   - MEDIUM: 한 검색 경로에서만 발견
+   - 각 후보의 신뢰도와 점수
+
+4. **추가 고려사항**
+   - 유사 품목과의 구분 기준
+   - 분류 시 주의점
+   - 필요 시 추가 정보 요청 사항
+
+답변은 전문적이면서도 이해하기 쉽게 작성해주세요.
+"""
+    
+    # Gemini 처리
+    logger.log_actual("AI", "Processing with enhanced parallel search context...")
+    ai_processing_start = time.time()
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    
+    ai_processing_time = time.time() - ai_processing_start
+    final_answer = clean_text(response.text)
+    
+    logger.log_actual("SUCCESS", "Gemini processing completed", 
+                     f"{ai_processing_time:.2f}s, input: {len(prompt)} chars, output: {len(final_answer)} chars")
+    
+    return final_answer
 
 # 질문 유형 분류 함수 (LLM 기반)
 def classify_question(user_input):

@@ -1,10 +1,12 @@
 import streamlit as st
 from google import genai
+import time
+from datetime import datetime
 
 import os
 from dotenv import load_dotenv
 from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
-from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs, get_hs_explanations
+from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -81,49 +83,226 @@ if 'context' not in st.session_state:
 지금까지의 대화:
 """
 
-def process_input():
-    ui = st.session_state.user_input
-    if not ui: 
-        return
-
-    st.session_state.chat_history.append({"role": "user", "content": ui})
-    hs_manager = get_hs_manager()
-
-    if st.session_state.selected_category == "AI자동분류":
-        q_type = classify_question(ui)
-    else:
-        # 사용자 선택에 따른 매핑
-        category_mapping = {
-            "웹검색": "web_search",
-            "국내HS분류사례 검색": "hs_classification", 
-            "해외HS분류사례검색": "overseas_hs",
-            "HS해설서분석": "hs_manual",
-            "HS해설서원문검색": "hs_manual_raw"
+class RealTimeProcessLogger:
+    def __init__(self, container):
+        self.container = container
+        self.log_placeholder = container.empty()
+        self.logs = []
+        self.start_time = time.time()
+    
+    def log_actual(self, level, message, data=None):
+        """실제 진행 상황만 기록"""
+        elapsed = time.time() - self.start_time
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
+        log_entry = {
+            "time": timestamp,
+            "elapsed": f"{elapsed:.2f}s",
+            "level": level,
+            "message": message,
+            "data": data
         }
-        q_type = category_mapping.get(st.session_state.selected_category, "hs_classification")
+        self.logs.append(log_entry)
+        self.update_display()
+    
+    def update_display(self):
+        log_text = ""
+        icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "DATA": "📊", "AI": "🤖", "SEARCH": "🔍"}
+        
+        for log in self.logs[-8:]:
+            icon = icons.get(log['level'], "📝")
+            data_str = f" | {log['data']}" if log['data'] else ""
+            log_text += f"`{log['time']}` `+{log['elapsed']}` {icon} {log['message']}{data_str}\n\n"
+        
+        self.log_placeholder.markdown(log_text)
+    
+    def clear(self):
+        self.logs = []
+        self.log_placeholder.empty()
 
-    # 질문 유형별 분기
-    if q_type == "web_search":
-        answer = "\n\n +++ 웹검색 실시 +++\n\n" + handle_web_search(ui, st.session_state.context, hs_manager)
-    elif q_type == "hs_classification":
-        answer = "\n\n +++ HS 분류사례 검색 실시 +++ \n\n" + handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
-    elif q_type == "hs_manual":
-        answer = "\n\n +++ HS 해설서 분석 실시 +++ \n\n" + handle_hs_manual(ui, st.session_state.context, hs_manager)
-    elif q_type == "overseas_hs":
-        answer = "\n\n +++ 해외 HS 분류 검색 실시 +++ \n\n" + handle_overseas_hs(ui, st.session_state.context, hs_manager)
-    elif q_type == "hs_manual_raw":
-        hs_codes = extract_hs_codes(ui)
-        if hs_codes:
-            answer = "\n\n +++ HS 해설서 원문 검색 실시 +++ \n\n" + clean_text(get_hs_explanations(hs_codes))
+def handle_hs_classification_with_logging(user_input, context, hs_manager, logger):
+    """국내 HS 분류 처리 - 실제 과정 로깅"""
+    
+    logger.log_actual("DATA", "Starting multi-agent domestic search...")
+    group_answers = []
+    
+    for i in range(5):
+        logger.log_actual("SEARCH", f"Searching group {i+1}/5...")
+        search_start = time.time()
+        
+        relevant = hs_manager.get_domestic_context_group(user_input, i)
+        search_time = time.time() - search_start
+        
+        result_count = len(relevant.split('\n\n')) if relevant else 0
+        logger.log_actual("DATA", f"Group {i+1} search completed", f"{result_count} items in {search_time:.2f}s")
+        
+        if relevant:
+            logger.log_actual("AI", f"Sending group {i+1} to Gemini...")
+            ai_start = time.time()
+            
+            prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            
+            ai_time = time.time() - ai_start
+            response_text = clean_text(response.text)
+            group_answers.append(response_text)
+            
+            logger.log_actual("SUCCESS", f"Group {i+1} AI response received", f"{len(response_text)} chars in {ai_time:.2f}s")
         else:
-            answer = "HS 코드를 찾을 수 없습니다. 4자리 HS 코드를 입력해주세요. (예: 1234 또는 HS1234)"
-    else:
-        # 예외 처리: 기본 HS 분류
-        answer = handle_hs_classification_cases(ui, st.session_state.context, hs_manager)
+            logger.log_actual("INFO", f"Group {i+1} returned no relevant data")
+            group_answers.append("")
 
-    st.session_state.chat_history.append({"role": "assistant", "content": answer})
-    st.session_state.context += f"\n사용자: {ui}\n품목분류 전문가: {answer}\n"
-    st.session_state.user_input = ""
+    logger.log_actual("AI", "Head Agent consolidating responses...")
+    head_start = time.time()
+    
+    head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다...\n"
+    for idx, ans in enumerate(group_answers):
+        if ans:
+            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    
+    head_response = client.models.generate_content(model="gemini-2.5-flash", contents=head_prompt)
+    head_time = time.time() - head_start
+    
+    final_answer = clean_text(head_response.text)
+    logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{len(final_answer)} chars in {head_time:.2f}s")
+    
+    return "\n\n +++ HS 분류사례 검색 실시 +++ \n\n" + final_answer
+
+def handle_overseas_hs_with_logging(user_input, context, hs_manager, logger):
+    """해외 HS 분류 처리 - 실제 과정 로깅"""
+    
+    logger.log_actual("DATA", "Loading overseas HS data (US/EU)...")
+    group_answers = []
+    
+    for i in range(5):
+        logger.log_actual("SEARCH", f"Searching overseas group {i+1}/5...")
+        search_start = time.time()
+        
+        relevant = hs_manager.get_overseas_context_group(user_input, i)
+        search_time = time.time() - search_start
+        
+        result_count = len(relevant.split('\n\n')) if relevant else 0
+        country = "US" if i < 3 else "EU"
+        logger.log_actual("DATA", f"{country} group {i+1} search completed", f"{result_count} items in {search_time:.2f}s")
+        
+        if relevant:
+            logger.log_actual("AI", f"Processing {country} group {i+1} with Gemini...")
+            ai_start = time.time()
+            
+            prompt = f"{context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            
+            ai_time = time.time() - ai_start
+            response_text = clean_text(response.text)
+            group_answers.append(response_text)
+            
+            logger.log_actual("SUCCESS", f"{country} group {i+1} response received", f"{len(response_text)} chars in {ai_time:.2f}s")
+        else:
+            logger.log_actual("INFO", f"{country} group {i+1} returned no data")
+            group_answers.append("")
+
+    logger.log_actual("AI", "Head Agent consolidating overseas responses...")
+    head_start = time.time()
+    
+    head_prompt = f"{context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다...\n"
+    for idx, ans in enumerate(group_answers):
+        if ans:
+            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+    head_prompt += f"\n사용자: {user_input}\n"
+    
+    head_response = client.models.generate_content(model="gemini-2.5-flash", contents=head_prompt)
+    head_time = time.time() - head_start
+    
+    final_answer = clean_text(head_response.text)
+    logger.log_actual("SUCCESS", "Overseas Head Agent completed", f"{len(final_answer)} chars in {head_time:.2f}s")
+    
+    return "\n\n +++ 해외 HS 분류 검색 실시 +++ \n\n" + final_answer
+
+def process_query_with_real_logging(user_input):
+    """실제 진행사항을 기록하면서 쿼리 처리"""
+    
+    log_container = st.container()
+    logger = RealTimeProcessLogger(log_container)
+    
+    try:
+        logger.log_actual("INFO", "Query processing started", f"Input length: {len(user_input)}")
+        
+        start_time = time.time()
+        hs_manager = get_hs_manager()
+        load_time = time.time() - start_time
+        logger.log_actual("SUCCESS", "HSDataManager loaded", f"{load_time:.2f}s")
+        
+        category = st.session_state.selected_category
+        logger.log_actual("INFO", "Category selected", category)
+        
+        if category == "AI자동분류":
+            logger.log_actual("AI", "Starting LLM question classification...")
+            start_classify = time.time()
+            q_type = classify_question(user_input)
+            classify_time = time.time() - start_classify
+            logger.log_actual("SUCCESS", "LLM classification completed", f"{q_type} in {classify_time:.2f}s")
+        else:
+            category_mapping = {
+                "웹검색": "web_search",
+                "국내HS분류사례 검색": "hs_classification", 
+                "해외HS분류사례검색": "overseas_hs",
+                "HS해설서분석": "hs_manual",
+                "HS해설서원문검색": "hs_manual_raw"
+            }
+            q_type = category_mapping.get(category, "hs_classification")
+            logger.log_actual("INFO", "Question type mapped", q_type)
+
+        answer_start = time.time()
+        
+        if q_type == "web_search":
+            logger.log_actual("SEARCH", "Initiating Google Search API call...")
+            ai_start = time.time()
+            answer = "\n\n +++ 웹검색 실시 +++\n\n" + handle_web_search(user_input, st.session_state.context, hs_manager)
+            ai_time = time.time() - ai_start
+            logger.log_actual("SUCCESS", "Web search completed", f"{ai_time:.2f}s, {len(answer)} chars")
+            
+        elif q_type == "hs_classification":
+            answer = handle_hs_classification_with_logging(user_input, st.session_state.context, hs_manager, logger)
+            
+        elif q_type == "overseas_hs":
+            answer = handle_overseas_hs_with_logging(user_input, st.session_state.context, hs_manager, logger)
+            
+        elif q_type == "hs_manual":
+            logger.log_actual("AI", "Starting enhanced parallel HS manual analysis...")
+            ai_start = time.time()
+            answer = "\n\n +++ HS 해설서 분석 실시 (병렬 검색) +++ \n\n" + handle_hs_manual_with_parallel_search(user_input, st.session_state.context, hs_manager, logger)
+            ai_time = time.time() - ai_start
+            logger.log_actual("SUCCESS", "Enhanced HS manual analysis completed", f"{ai_time:.2f}s, {len(answer)} chars")
+            
+        elif q_type == "hs_manual_raw":
+            logger.log_actual("SEARCH", "Extracting HS codes...")
+            hs_codes = extract_hs_codes(user_input)
+            if hs_codes:
+                logger.log_actual("SUCCESS", f"Found {len(hs_codes)} HS codes", ", ".join(hs_codes))
+                logger.log_actual("DATA", "Retrieving raw HS explanations...")
+                raw_start = time.time()
+                raw_answer = clean_text(get_hs_explanations(hs_codes))
+                raw_time = time.time() - raw_start
+                answer = "\n\n +++ HS 해설서 원문 검색 실시 +++ \n\n" + raw_answer
+                logger.log_actual("SUCCESS", "Raw HS manual retrieved", f"{raw_time:.2f}s, {len(raw_answer)} chars")
+            else:
+                logger.log_actual("ERROR", "No valid HS codes found in input")
+                answer = "HS 코드를 찾을 수 없습니다. 4자리 HS 코드를 입력해주세요."
+
+        answer_time = time.time() - answer_start
+        logger.log_actual("SUCCESS", "Answer generation completed", f"{answer_time:.2f}s, {len(answer)} chars")
+        
+        total_time = time.time() - logger.start_time
+        logger.log_actual("INFO", "Process completed successfully", f"Total time: {total_time:.2f}s")
+        
+        # Return the answer for external processing
+        return answer
+        
+    except Exception as e:
+        logger.log_actual("ERROR", f"Exception occurred: {str(e)}")
+        logger.log_actual("ERROR", f"Error type: {type(e).__name__}")
+        raise e
 
 
 # 사이드바 설정 (main.py의 with st.sidebar: 부분 교체)
@@ -174,12 +353,14 @@ st.title("HS 품목분류 챗봇")
 st.write("HS 품목분류에 대해 질문해주세요!")
 
 # 질문 유형 선택 라디오 버튼
-st.session_state.selected_category = st.radio(
+selected_category = st.radio(
     "질문 유형을 선택하세요:",
     ["AI자동분류", "웹검색", "국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석", "HS해설서원문검색"],
     index=0,  # 기본값: AI자동분류
-    horizontal=True
+    horizontal=True,
+    key="category_radio"
 )
+st.session_state.selected_category = selected_category
 
 st.divider()  # 구분선 추가
 
@@ -201,15 +382,37 @@ for message in st.session_state.chat_history:
                     </div>""", unsafe_allow_html=True)
 
 
-# 하단 입력 영역 (Enter 키로만 전송)
+# 하단 입력 영역 (Form 기반 입력)
 input_container = st.container()
 st.markdown("<div style='flex: 1;'></div>", unsafe_allow_html=True)
 
 with input_container:
-    # on_change 콜백으로 Enter 누를 때 process_input() 호출
-    st.text_input(
-        "품목에 대해 질문하세요:", 
-        key="user_input", 
-        on_change=process_input, 
-        placeholder="여기에 입력 후 Enter"
-    )
+    # Form을 사용하여 안정적인 입력 처리
+    with st.form("query_form", clear_on_submit=True):
+        user_input = st.text_input(
+            "품목에 대해 질문하세요:", 
+            placeholder="여기에 입력 후 Enter 또는 전송 버튼 클릭"
+        )
+        
+        # 두 개의 컬럼으로 나누어 버튼을 오른쪽에 배치
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            submit_button = st.form_submit_button("전송", use_container_width=True)
+        
+        # 폼이 제출되고 입력값이 있을 때 처리
+        if submit_button and user_input and user_input.strip():
+            with st.expander("실시간 처리 과정 로그 보기", expanded=True):
+                try:
+                    # Process query with real-time logging
+                    answer = process_query_with_real_logging(user_input)
+                    
+                    # Update chat history after successful processing
+                    st.session_state.chat_history.append({"role": "user", "content": user_input})
+                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                    st.session_state.context += f"\n사용자: {user_input}\n품목분류 전문가: {answer}\n"
+                    
+                    # Force rerun to display the new chat messages
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"처리 중 오류가 발생했습니다: {str(e)}")
