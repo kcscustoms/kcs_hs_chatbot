@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
-from utils import handle_web_search, handle_hs_classification_cases, handle_hs_manual, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search
+from utils import handle_web_search, handle_hs_classification_cases, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -33,20 +33,10 @@ st.markdown("""
 .main > div > div:last-child {
     margin-top: auto;  # 마지막 요소를 하단에 고정
 }
-.element-container:has(button) {
-    background-color: #f0f2f6;  # 버튼 컨테이너 배경색
-    padding: 10px;
-    border-radius: 10px;
-}
-.stTextArea textarea {
-    border-radius: 20px;  # 입력창 모서리 둥글게
-    padding: 10px 15px;
+.stTextInput input {
+    border-radius: 10px;  # 입력창 모서리 둥글게
+    padding: 8px 12px;
     font-size: 16px;
-    min-height: 50px !important;  # 최소 높이
-    max-height: 300px !important;  # 최대 높이
-    height: auto !important;  # 자동 높이 조절
-    resize: vertical !important;  # 수직 방향으로만 크기 조절 가능
-    overflow-y: auto !important;  # 내용이 많을 때 스크롤 표시
 }
 </style>
 """, unsafe_allow_html=True)
@@ -64,7 +54,7 @@ if 'selected_category' not in st.session_state:
     st.session_state.selected_category = "AI자동분류"  # 기본값
 
 if 'context' not in st.session_state:
-    # 초기 컨텍스트 설정 (카테고리 분류 안내 추가)
+    # 초기 컨텍스트 설정
     st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
 
 질문 유형:
@@ -120,104 +110,6 @@ class RealTimeProcessLogger:
         self.logs = []
         self.log_placeholder.empty()
 
-def handle_hs_classification_with_logging(user_input, context, hs_manager, logger):
-    """국내 HS 분류 처리 - 실제 과정 로깅"""
-    
-    logger.log_actual("DATA", "Starting multi-agent domestic search...")
-    group_answers = []
-    
-    for i in range(5):
-        logger.log_actual("SEARCH", f"Searching group {i+1}/5...")
-        search_start = time.time()
-        
-        relevant = hs_manager.get_domestic_context_group(user_input, i)
-        search_time = time.time() - search_start
-        
-        result_count = len(relevant.split('\n\n')) if relevant else 0
-        logger.log_actual("DATA", f"Group {i+1} search completed", f"{result_count} items in {search_time:.2f}s")
-        
-        if relevant:
-            logger.log_actual("AI", f"Sending group {i+1} to Gemini...")
-            ai_start = time.time()
-            
-            prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-            
-            ai_time = time.time() - ai_start
-            response_text = clean_text(response.text)
-            group_answers.append(response_text)
-            
-            logger.log_actual("SUCCESS", f"Group {i+1} AI response received", f"{len(response_text)} chars in {ai_time:.2f}s")
-        else:
-            logger.log_actual("INFO", f"Group {i+1} returned no relevant data")
-            group_answers.append("")
-
-    logger.log_actual("AI", "Head Agent consolidating responses...")
-    head_start = time.time()
-    
-    head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다...\n"
-    for idx, ans in enumerate(group_answers):
-        if ans:
-            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-    head_prompt += f"\n사용자: {user_input}\n"
-    
-    head_response = client.models.generate_content(model="gemini-2.5-flash", contents=head_prompt)
-    head_time = time.time() - head_start
-    
-    final_answer = clean_text(head_response.text)
-    logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{len(final_answer)} chars in {head_time:.2f}s")
-    
-    return "\n\n +++ HS 분류사례 검색 실시 +++ \n\n" + final_answer
-
-def handle_overseas_hs_with_logging(user_input, context, hs_manager, logger):
-    """해외 HS 분류 처리 - 실제 과정 로깅"""
-    
-    logger.log_actual("DATA", "Loading overseas HS data (US/EU)...")
-    group_answers = []
-    
-    for i in range(5):
-        logger.log_actual("SEARCH", f"Searching overseas group {i+1}/5...")
-        search_start = time.time()
-        
-        relevant = hs_manager.get_overseas_context_group(user_input, i)
-        search_time = time.time() - search_start
-        
-        result_count = len(relevant.split('\n\n')) if relevant else 0
-        country = "US" if i < 3 else "EU"
-        logger.log_actual("DATA", f"{country} group {i+1} search completed", f"{result_count} items in {search_time:.2f}s")
-        
-        if relevant:
-            logger.log_actual("AI", f"Processing {country} group {i+1} with Gemini...")
-            ai_start = time.time()
-            
-            prompt = f"{context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-            
-            ai_time = time.time() - ai_start
-            response_text = clean_text(response.text)
-            group_answers.append(response_text)
-            
-            logger.log_actual("SUCCESS", f"{country} group {i+1} response received", f"{len(response_text)} chars in {ai_time:.2f}s")
-        else:
-            logger.log_actual("INFO", f"{country} group {i+1} returned no data")
-            group_answers.append("")
-
-    logger.log_actual("AI", "Head Agent consolidating overseas responses...")
-    head_start = time.time()
-    
-    head_prompt = f"{context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다...\n"
-    for idx, ans in enumerate(group_answers):
-        if ans:
-            head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-    head_prompt += f"\n사용자: {user_input}\n"
-    
-    head_response = client.models.generate_content(model="gemini-2.5-flash", contents=head_prompt)
-    head_time = time.time() - head_start
-    
-    final_answer = clean_text(head_response.text)
-    logger.log_actual("SUCCESS", "Overseas Head Agent completed", f"{len(final_answer)} chars in {head_time:.2f}s")
-    
-    return "\n\n +++ 해외 HS 분류 검색 실시 +++ \n\n" + final_answer
 
 def process_query_with_real_logging(user_input):
     """실제 진행사항을 기록하면서 쿼리 처리"""
@@ -263,10 +155,18 @@ def process_query_with_real_logging(user_input):
             logger.log_actual("SUCCESS", "Web search completed", f"{ai_time:.2f}s, {len(answer)} chars")
             
         elif q_type == "hs_classification":
-            answer = handle_hs_classification_with_logging(user_input, st.session_state.context, hs_manager, logger)
+            logger.log_actual("AI", "Starting domestic HS classification search...")
+            ai_start = time.time()
+            answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + handle_hs_classification_cases(user_input, st.session_state.context, hs_manager)
+            ai_time = time.time() - ai_start
+            logger.log_actual("SUCCESS", "Domestic HS classification completed", f"{ai_time:.2f}s, {len(answer)} chars")
             
         elif q_type == "overseas_hs":
-            answer = handle_overseas_hs_with_logging(user_input, st.session_state.context, hs_manager, logger)
+            logger.log_actual("AI", "Starting overseas HS classification search...")
+            ai_start = time.time()
+            answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + handle_overseas_hs(user_input, st.session_state.context, hs_manager)
+            ai_time = time.time() - ai_start
+            logger.log_actual("SUCCESS", "Overseas HS classification completed", f"{ai_time:.2f}s, {len(answer)} chars")
             
         elif q_type == "hs_manual":
             logger.log_actual("AI", "Starting enhanced parallel HS manual analysis...")
@@ -350,12 +250,13 @@ with st.sidebar:
     # 새로운 채팅 시작 버튼
     if st.button("새로운 채팅 시작하기", type="primary"):
         st.session_state.chat_history = []  # 채팅 기록 초기화
+        # 컨텍스트 초기화 (기본 컨텍스트 재사용)
         st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
 
 질문 유형:
-1. 웹 검색(Web Search): 물품개요, 용도, 뉴스, 무역동향, 산업동향 등 일반 정보 탐색이 필요한 경우.
+1. 웹 검색(Web Search): 물품개요, 용도, 기술개발, 무역동향 등 일반 정보 탐색이 필요한 경우.
 2. HS 분류 검색(HS Classification Search): HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. HS 해설서 분석(HS Manual Analysis): HS 해설서, 규정, 판례 등 심층 분석이 필요한 경우.
+3. HS 해설서 분석(HS Manual Analysis): HS 해설서 본문 심층 분석이 필요한 경우.
 4. 해외 HS 분류(Overseas HS Classification): 해외(미국/EU) HS 분류 사례가 필요한 경우.
 
 중요 지침:

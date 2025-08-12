@@ -10,8 +10,6 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
-
-
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
@@ -248,38 +246,7 @@ class HSDataManager:
         
         return "\n\n".join(context)
     
-    def search_overseas_improved(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """해외 HS 분류 데이터에서만 검색하는 개선된 메서드 (search_index 활용)"""
-        query_keywords = self._extract_keywords(query)
-        results = defaultdict(int)
-        
-        # 해외 데이터 소스만 필터링
-        overseas_sources = ['hs_classification_data_us', 'hs_classification_data_eu']
-        
-        for keyword in query_keywords:
-            for source, item in self.search_index.get(keyword, []):
-                # 해외 데이터 소스만 포함
-                if source in overseas_sources:
-                    results[(source, str(item))] += 1
-        
-        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
-        
-        return [
-            {'source': source, 'item': eval(item_str)}
-            for (source, item_str), _ in sorted_results[:max_results]
-        ]
     
-    def get_domestic_context(self, query: str) -> str:
-        """국내 HS 분류 관련 컨텍스트를 생성하는 메서드"""
-        results = self.search_domestic(query)
-        context = []
-        
-        for result in results:
-            context.append(f"출처: {result['source']} (국내 관세청)\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
-        
-        return "\n\n".join(context)
-
-
     def get_relevant_context(self, query: str) -> str:
         """
         쿼리에 관련된 컨텍스트를 생성하는 메서드
@@ -296,23 +263,6 @@ class HSDataManager:
         
         return "\n\n".join(context)
     
-    def get_overseas_context_improved(self, query: str) -> str:
-        """해외 HS 분류 관련 컨텍스트를 생성하는 개선된 메서드"""
-        results = self.search_overseas_improved(query)
-        context = []
-        
-        for result in results:
-            # 출처에 따라 국가 구분
-            if result['source'] == 'hs_classification_data_us':
-                country = "미국 관세청"
-            elif result['source'] == 'hs_classification_data_eu':
-                country = "EU 관세청"
-            else:
-                country = "해외 관세청"
-                
-            context.append(f"출처: {result['source']} ({country})\n항목: {json.dumps(result['item'], ensure_ascii=False)}")
-        
-        return "\n\n".join(context)
 
 # HTML 태그 제거 및 텍스트 정제 함수
 def clean_text(text):
@@ -821,18 +771,6 @@ def handle_hs_classification_cases(user_input, context, hs_manager):
     )
     return clean_text(head_response.text)
 
-def handle_hs_manual(user_input, context, hs_manager):
-    # 예: HS 해설서 분석 전용 컨텍스트 추가
-    manual_context = context + "\n(심층 해설서 분석 모드)"
-    hs_codes = extract_hs_codes(user_input)
-    explanations = get_hs_explanations(hs_codes) if hs_codes else ""
-    prompt = f"{manual_context}\n\n관련 데이터:\n{explanations}\n\n사용자: {user_input}\n"
-    # client.models.generate_content 사용
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", # 모델명 단순화
-        contents=prompt
-    )
-    return clean_text(response.text)
 
 def handle_overseas_hs(user_input, context, hs_manager):
     """해외 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
