@@ -156,17 +156,99 @@ def process_query_with_real_logging(user_input):
             
         elif q_type == "hs_classification":
             logger.log_actual("AI", "Starting domestic HS classification search...")
-            ai_start = time.time()
-            answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + handle_hs_classification_cases(user_input, st.session_state.context, hs_manager)
-            ai_time = time.time() - ai_start
-            logger.log_actual("SUCCESS", "Domestic HS classification completed", f"{ai_time:.2f}s, {len(answer)} chars")
+            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups parallel processing")
+            
+            # 5개 그룹별로 각각 처리하면서 로깅
+            group_answers = []
+            group_start = time.time()
+            
+            for i in range(5):
+                logger.log_actual("SEARCH", f"Group {i+1} data retrieval starting...")
+                group_data_start = time.time()
+                relevant = hs_manager.get_domestic_context_group(user_input, i)
+                group_data_time = time.time() - group_data_start
+                logger.log_actual("DATA", f"Group {i+1} data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
+                
+                logger.log_actual("AI", f"Group {i+1} LLM processing...")
+                group_ai_start = time.time()
+                prompt = f"{st.session_state.context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                )
+                group_answer = clean_text(response.text)
+                group_answers.append(group_answer)
+                group_ai_time = time.time() - group_ai_start
+                logger.log_actual("SUCCESS", f"Group {i+1} completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
+            
+            groups_total_time = time.time() - group_start
+            logger.log_actual("INFO", "All groups completed", f"Total: {groups_total_time:.2f}s")
+            
+            # Head Agent 처리
+            logger.log_actual("AI", "Head Agent consolidation starting...")
+            head_start = time.time()
+            head_prompt = f"{st.session_state.context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+            for idx, ans in enumerate(group_answers):
+                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+            head_prompt += f"\n사용자: {user_input}\n"
+            head_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=head_prompt
+            )
+            final_answer = clean_text(head_response.text)
+            head_time = time.time() - head_start
+            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
+            
+            answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + final_answer
             
         elif q_type == "overseas_hs":
             logger.log_actual("AI", "Starting overseas HS classification search...")
-            ai_start = time.time()
-            answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + handle_overseas_hs(user_input, st.session_state.context, hs_manager)
-            ai_time = time.time() - ai_start
-            logger.log_actual("SUCCESS", "Overseas HS classification completed", f"{ai_time:.2f}s, {len(answer)} chars")
+            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups (US/EU) parallel processing")
+            overseas_context = st.session_state.context + "\n(해외 HS 분류 사례 분석 모드)"
+            
+            # 5개 그룹별로 각각 처리하면서 로깅
+            group_answers = []
+            group_start = time.time()
+            
+            for i in range(5):
+                group_type = "US" if i < 3 else "EU"
+                logger.log_actual("SEARCH", f"Group {i+1} ({group_type}) data retrieval starting...")
+                group_data_start = time.time()
+                relevant = hs_manager.get_overseas_context_group(user_input, i)
+                group_data_time = time.time() - group_data_start
+                logger.log_actual("DATA", f"Group {i+1} ({group_type}) data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
+                
+                logger.log_actual("AI", f"Group {i+1} ({group_type}) LLM processing...")
+                group_ai_start = time.time()
+                prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                )
+                group_answer = clean_text(response.text)
+                group_answers.append(group_answer)
+                group_ai_time = time.time() - group_ai_start
+                logger.log_actual("SUCCESS", f"Group {i+1} ({group_type}) completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
+            
+            groups_total_time = time.time() - group_start
+            logger.log_actual("INFO", "All overseas groups completed", f"Total: {groups_total_time:.2f}s")
+            
+            # Head Agent 처리
+            logger.log_actual("AI", "Head Agent consolidation starting...")
+            head_start = time.time()
+            head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+            for idx, ans in enumerate(group_answers):
+                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
+            head_prompt += f"\n사용자: {user_input}\n"
+            head_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=head_prompt
+            )
+            final_answer = clean_text(head_response.text)
+            head_time = time.time() - head_start
+            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
+            
+            answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + final_answer
             
         elif q_type == "hs_manual":
             logger.log_actual("AI", "Starting enhanced parallel HS manual analysis...")
