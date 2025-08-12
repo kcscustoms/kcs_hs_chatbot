@@ -29,9 +29,12 @@ HS 품목분류 전문가 AI 챗봇입니다. 관세청 품목분류 사례, 해
 - **Multi Agents 시스템**: 해외 데이터를 5개 그룹으로 분할 분석
 - 국제적인 HS 분류 동향 및 비교 분석 제공
 
-### 5. **HS 해설서 분석** 📚
-- HS 해설서, 통칙, 규정 등을 바탕으로 한 심층 분석
-- 품목의 성분, 용도, 가공상태를 고려한 전문적 해석
+### 5. **HS 해설서 분석 (병렬 검색)** 📚
+- **혁신적 병렬 검색 시스템**: 관세율표와 HS 해설서를 동시에 활용
+- **2단계 검색**: 관세율표에서 유사도 높은 HS코드 후보 선정 → 해설서 상세 분석
+- **가중치 기반 점수**: 관세율표(40%) + 해설서(60%) 종합 평가
+- **신뢰도 등급**: HIGH(두 경로 발견) / MEDIUM(단일 경로) 제공
+- **실시간 프로세스 로깅**: 모든 검색 과정의 투명한 공개
 
 ### 6. **HS 해설서 원문 검색** 📖
 - 특정 HS 코드의 해설서 원문을 구조화된 형태로 제공
@@ -41,9 +44,17 @@ HS 품목분류 전문가 AI 챗봇입니다. 관세청 품목분류 사례, 해
 
 ### 필수 요구사항
 ```bash
-pip install streamlit
+pip install -r requirements.txt
+```
+
+**또는 개별 설치:**
+```bash
 pip install google-genai
 pip install python-dotenv
+pip install streamlit
+pip install typing-extensions
+pip install numpy
+pip install pandas
 pip install requests
 ```
 
@@ -54,12 +65,13 @@ GOOGLE_API_KEY=your_google_api_key_here
 ```
 
 2. 필요한 데이터 파일들을 `knowledge/` 폴더에 배치:
-   - `HS분류사례_part1.json` ~ `HS분류사례_part10.json`
-   - `HS위원회.json`, `HS협의회.json`
+   - `HS분류사례_part1.json` ~ `HS분류사례_part10.json` (국내 분류사례)
+   - `HS위원회.json`, `HS협의회.json` (위원회/협의회 결정)
    - `hs_classification_data_us.json` (미국 관세청 데이터)
    - `hs_classification_data_eu.json` (EU 관세청 데이터)
-   - `통칙_grouped.json`
-   - `grouped_11_end.json`
+   - `hstable.json` (관세율표 - 병렬검색용)
+   - `통칙_grouped.json` (HS 통칙)
+   - `grouped_11_end.json` (HS 해설서)
 
 ### 실행
 ```bash
@@ -182,47 +194,57 @@ streamlit run main.py
 - 국제적으로 유사한 분류 체계 유지
 ```
 
-### 5. HS 해설서 분석 사용법
+### 5. HS 해설서 분석 사용법 (병렬 검색)
 **사용 시점**: HS 해설서 내용을 바탕으로 한 심층 분석이 필요할 때
+
+**🔄 병렬 검색 프로세스**:
+1. **경로 1**: 관세율표에서 유사도 기반 HS코드 후보 선정
+2. **경로 2**: 해설서에서 직접 검색 (기존 Multi-Agent 방식)
+3. **결과 통합**: 가중치 기반 최종 순위 결정
 
 **예시 질문**:
 ```
-"2106호와 2202호의 차이점"
-"플라스틱과 고무의 HS 분류 구분 기준"
-"섬유제품 3류와 6류 분류 기준"
-"통칙 3호 적용 사례"
+"스마트폰의 HS 분류"
+"리튬이온 배터리 품목분류"  
+"LED 조명 HS 코드"
+"화장품용 세럼 분류 기준"
 ```
 
 **답변 예시**:
 ```
-+++ HS 해설서 분석 실시 +++
++++ HS 해설서 분석 실시 (병렬 검색) +++
 
-2106호와 2202호의 분류 기준 차이점:
+스마트폰의 HS 분류 분석 결과:
 
-【HS 2106호 - 기타 조제식료품】
-1. 해설서 정의
-   - 다른 호에 분류되지 않는 조제식료품
-   - 영양가 있는 식품으로서 직접 섭취 가능
+【최적 HS 코드】: 8517.12-1000
+【신뢰도】: HIGH (두 검색 경로 모두 일치)
 
-2. 주요 포함 품목
-   - 단백질 농축물, 영양보충제
-   - 조제분유, 이유식
-   - 향미료, 조미료
+【병렬 검색 결과】
+1. 관세율표 기반 (신뢰도: 0.89)
+   - 품목명: "전화기(셀룰러 네트워크용)"
+   - 유사도 점수: 0.92
 
-【HS 2202호 - 기타 무알코올음료】
-1. 해설서 정의
-   - 알코올 용량 0.5% 이하의 음료
-   - 갈증 해소 목적의 액체 상태 제품
+2. 해설서 기반 (다중 그룹 검색)
+   - 그룹 1-3: 8517호 관련 사례 발견
+   - 분류 근거: 무선통신 기능 중심
 
-2. 주요 포함 품목
-   - 탄산음료, 과일주스
-   - 에너지 드링크, 이온음료
-   - 물 기반의 기능성 음료
+【종합 분류 근거】
+- 관세율표: 직접적 품목명 매칭
+- 해설서: 무선통신기기 분류 기준 적합
+- 통신 기능이 주요 용도로 8517호 적용
 
-【구분 기준】
-1. 형태: 2106호는 고체/분말 가능, 2202호는 액체만
-2. 목적: 2106호는 영양 보충, 2202호는 갈증 해소
-3. 섭취법: 2106호는 조리/희석 필요한 경우 多, 2202호는 바로 음용
+【추가 고려사항】
+- 카메라 기능은 부차적 기능으로 분류에 영향 없음
+- 컴퓨팅 기능보다 통신 기능이 우선
+```
+
+**🔍 실시간 로깅 예시**:
+```
+15:23:45.123 +0.05s 🔍 Path 1: Tariff Table → Manual search starting...
+15:23:45.445 +0.37s 📊 Tariff table search completed | 12 candidates in 0.22s
+15:23:45.667 +0.54s 🔍 Path 2: Direct manual search starting...
+15:23:47.234 +2.16s 🤖 Consolidating parallel search results...
+15:23:47.891 +2.83s ✅ Results consolidation completed | 5 unique HS codes
 ```
 
 ### 6. HS 해설서 원문 검색 사용법
@@ -276,19 +298,23 @@ streamlit run main.py
 
 ```
 HS_Chatbot/
-├── main.py                 # Streamlit 메인 애플리케이션
-├── utils.py                # 핵심 기능 및 유틸리티 함수
+├── main.py                 # Streamlit 메인 애플리케이션 (실시간 로깅 포함)
+├── utils.py                # 핵심 기능 및 병렬 검색 시스템
+├── hs_search.py            # HS 코드 검색 유틸리티
+├── CLAUDE.md              # Claude Code 개발 가이드
 ├── .env                    # 환경 변수 (API 키)
-├── requirements.txt        # 필요 패키지 목록
+├── requirements.txt        # 패키지 의존성 목록
 ├── README.md              # 프로젝트 문서
-└── knowledge/             # 데이터 파일 폴더
-    ├── HS분류사례_part1.json ~ part10.json
-    ├── HS위원회.json
-    ├── HS협의회.json
-    ├── hs_classification_data_us.json
-    ├── hs_classification_data_eu.json
-    ├── 통칙_grouped.json
-    └── grouped_11_end.json
+├── knowledge/             # 핵심 데이터 파일
+│   ├── HS분류사례_part1.json ~ part10.json  # 국내 분류사례
+│   ├── HS위원회.json, HS협의회.json          # 위원회 결정사항
+│   ├── hs_classification_data_us.json       # 미국 관세청 데이터
+│   ├── hs_classification_data_eu.json       # EU 관세청 데이터
+│   ├── hstable.json                         # 관세율표 (병렬검색)
+│   ├── 통칙_grouped.json                     # HS 통칙
+│   └── grouped_11_end.json                  # HS 해설서
+├── 품목분류표_제작/        # 관세율표 데이터 처리
+└── previously/            # 이전 버전 백업
 ```
 
 ## ⚙️ 환경 설정
@@ -303,10 +329,13 @@ HS_Chatbot/
 - 해외 관세청 분류 데이터
 - HS 해설서 및 통칙 데이터
 
-### 3. 성능 최적화
-- Streamlit 캐싱 활용 (`@st.cache_resource`)
-- Multi Agents 시스템으로 대용량 데이터 효율적 처리
-- 키워드 기반 검색 인덱스 구축
+### 3. 성능 최적화 및 고급 기능
+- **Streamlit 캐싱**: `@st.cache_resource`로 HSDataManager 최적화
+- **Multi Agents 시스템**: 대용량 데이터를 5개 그룹으로 병렬 처리
+- **병렬 검색 엔진**: 관세율표 + 해설서 동시 검색으로 정확도 향상
+- **실시간 로깅**: 모든 AI 처리 과정의 투명한 시각화
+- **유사도 기반 매칭**: SequenceMatcher를 활용한 정밀 텍스트 매칭
+- **가중치 기반 통합**: 다중 소스 결과의 지능적 결합
 
 ## 🤝 기여하기
 
@@ -327,4 +356,3 @@ HS_Chatbot/
 ---
 
 **Made with ❤️ for HS Classification Professionals**
-
