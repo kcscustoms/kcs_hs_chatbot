@@ -42,7 +42,7 @@ HS 품목분류 전문가 AI 챗봇입니다. 관세청 품목분류 사례, 해
 ### 필수 요구사항
 ```bash
 pip install streamlit
-pip install google-generativeai
+pip install google-genai
 pip install python-dotenv
 pip install requests
 ```
@@ -327,3 +327,4 @@ HS_Chatbot/
 ---
 
 **Made with ❤️ for HS Classification Professionals**
+
