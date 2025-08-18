@@ -1,6 +1,7 @@
-streamlit 
-scikit-learn 
 google-genai
-numpy
 python-dotenv
-pdfminer.six
+streamlit
+typing-extensions
+numpy
+pandas
+requests
