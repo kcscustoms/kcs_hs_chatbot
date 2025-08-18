@@ -1,422 +1,526 @@
+# 법령 통합 챗봇 - ./laws 폴더에서 사전 다운로드된 패키지 로드
 import streamlit as st
 from google import genai
-import time
-from datetime import datetime
-
 import os
-from dotenv import load_dotenv
-from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
-from utils import handle_web_search, handle_hs_classification_cases, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search
+import json
+import asyncio
+import concurrent.futures
+from pathlib import Path
+import glob
 
-# 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
-load_dotenv()
+# 분리된 핵심 로직 함수들을 utils.py에서 가져옵니다.
+from utils import (
+    process_json_data,
+    analyze_query,
+    get_agent_response,
+    get_head_agent_response_stream
+)
+from law_article_search import render_law_search_ui
 
-# Gemini API 설정
+# --- 환경 변수 및 Gemini API 설정 ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # Streamlit 페이지 설정
 st.set_page_config(
-    page_title="HS 품목분류 챗봇",  # 브라우저 탭 제목
-    page_icon="📊",  # 브라우저 탭 아이콘
-    layout="wide"  # 페이지 레이아웃을 넓게 설정
+    page_title="법령 통합 챗봇",
+    page_icon="📚",
+    layout="wide"
 )
 
-# 사용자 정의 CSS 스타일 추가
-st.markdown("""
-<style>
-.main > div {
-    display: flex;
-    flex-direction: column;
-    height: 85vh;  # 메인 컨테이너 높이 설정
-}
-.main > div > div:last-child {
-    margin-top: auto;  # 마지막 요소를 하단에 고정
-}
-.stTextInput input {
-    border-radius: 10px;  # 입력창 모서리 둥글게
-    padding: 8px 12px;
-    font-size: 16px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# HS 데이터 매니저 초기화 (캐싱을 통해 성능 최적화)
-@st.cache_resource
-def get_hs_manager():
-    return HSDataManager()
-
-# 세션 상태 초기화
+# --- 세션 상태 초기화 ---
 if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []  # 채팅 기록 저장
+    st.session_state.chat_history = []
+if 'law_data' not in st.session_state:
+    st.session_state.law_data = {}
+if 'embedding_data' not in st.session_state:
+    st.session_state.embedding_data = {}
+if 'event_loop' not in st.session_state:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    st.session_state.event_loop = loop
+if 'collected_laws' not in st.session_state:
+    st.session_state.collected_laws = {}
+if 'search_weights' not in st.session_state:
+    st.session_state.search_weights = {'content': 1.0, 'title': 0.0}
+if 'packages_loaded' not in st.session_state:
+    st.session_state.packages_loaded = False
+if 'selected_packages' not in st.session_state:
+    st.session_state.selected_packages = []
+if 'package_cache' not in st.session_state:
+    st.session_state.package_cache = {}
+if 'current_selected_packages' not in st.session_state:
+    st.session_state.current_selected_packages = []
 
-if 'selected_category' not in st.session_state:
-    st.session_state.selected_category = "AI자동분류"  # 기본값
-
-if 'context' not in st.session_state:
-    # 초기 컨텍스트 설정
-    st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
-
-질문 유형:
-1. 웹 검색(Web Search): 물품개요, 용도, 기술개발, 무역동향 등 일반 정보 탐색이 필요한 경우.
-2. HS 분류 검색(HS Classification Search): HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. HS 해설서 분석(HS Manual Analysis): HS 해설서 본문 심층 분석이 필요한 경우.
-4. 해외 HS 분류(Overseas HS Classification): 해외(미국/EU) HS 분류 사례가 필요한 경우.
-
-중요 지침:
-1. 사용자가 질문하는 물품에 대해 관련어, 유사품목, 대체품목도 함께 고려하여 가장 적합한 HS 코드를 찾아주세요.
-2. 품목의 성분, 용도, 가공상태 등을 고려하여 상세히 설명해주세요.
-3. 사용자가 특정 HS code를 언급하며 질문하는 경우, 답변에 해당 HS code 해설서 분석 내용을 포함하여 답변해주세요.
-4. 관련 규정이나 판례가 있다면 함께 제시해주세요.
-5. 답변은 간결하면서도 전문적으로 제공해주세요.
-
-지금까지의 대화:
-"""
-
-class RealTimeProcessLogger:
-    def __init__(self, container):
-        self.container = container
-        self.log_placeholder = container.empty()
-        self.logs = []
-        self.start_time = time.time()
+# --- 함수 정의 ---
+def get_available_packages():
+    """사용 가능한 패키지 목록 조회"""
+    laws_dir = Path("./laws")
+    if not laws_dir.exists():
+        return {}
     
-    def log_actual(self, level, message, data=None):
-        """실제 진행 상황만 기록"""
-        elapsed = time.time() - self.start_time
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        
-        log_entry = {
-            "time": timestamp,
-            "elapsed": f"{elapsed:.2f}s",
-            "level": level,
-            "message": message,
-            "data": data
-        }
-        self.logs.append(log_entry)
-        self.update_display()
+    json_files = list(laws_dir.glob("*.json"))
+    package_names = {
+        "customs_investigation": "관세조사",
+        "foreign_exchange_investigation": "외환조사", 
+        "foreign_trade": "대외무역",
+        "free_trade_agreement": "자유무역협정",
+        "refund": "환급"
+    }
     
-    def update_display(self):
-        log_text = ""
-        icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "DATA": "📊", "AI": "🤖", "SEARCH": "🔍"}
+    available_packages = {}
+    for json_file in json_files:
+        package_id = json_file.stem
+        package_name = package_names.get(package_id, package_id)
         
-        for log in self.logs[-8:]:
-            icon = icons.get(log['level'], "📝")
-            data_str = f" | {log['data']}" if log['data'] else ""
-            log_text += f"`{log['time']}` `+{log['elapsed']}` {icon} {log['message']}{data_str}\n\n"
-        
-        self.log_placeholder.markdown(log_text)
-    
-    def clear(self):
-        self.logs = []
-        self.log_placeholder.empty()
-
-
-def process_query_with_real_logging(user_input):
-    """실제 진행사항을 기록하면서 쿼리 처리"""
-    
-    log_container = st.container()
-    logger = RealTimeProcessLogger(log_container)
-    
-    try:
-        logger.log_actual("INFO", "Query processing started", f"Input length: {len(user_input)}")
-        
-        start_time = time.time()
-        hs_manager = get_hs_manager()
-        load_time = time.time() - start_time
-        logger.log_actual("SUCCESS", "HSDataManager loaded", f"{load_time:.2f}s")
-        
-        category = st.session_state.selected_category
-        logger.log_actual("INFO", "Category selected", category)
-        
-        if category == "AI자동분류":
-            logger.log_actual("AI", "Starting LLM question classification...")
-            start_classify = time.time()
-            q_type = classify_question(user_input)
-            classify_time = time.time() - start_classify
-            logger.log_actual("SUCCESS", "LLM classification completed", f"{q_type} in {classify_time:.2f}s")
-        else:
-            category_mapping = {
-                "웹검색": "web_search",
-                "국내HS분류사례 검색": "hs_classification", 
-                "해외HS분류사례검색": "overseas_hs",
-                "HS해설서분석": "hs_manual",
-                "HS해설서원문검색": "hs_manual_raw"
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                package_data = json.load(f)
+            
+            law_count = len(package_data)
+            article_count = sum(len(law_info['data']) for law_info in package_data.values())
+            
+            available_packages[package_id] = {
+                'name': package_name,
+                'law_count': law_count,
+                'article_count': article_count,
+                'laws': list(package_data.keys())
             }
-            q_type = category_mapping.get(category, "hs_classification")
-            logger.log_actual("INFO", "Question type mapped", q_type)
+        except Exception as e:
+            st.error(f"❌ {package_name} 패키지 정보 읽기 실패: {str(e)}")
+    
+    return available_packages
 
-        answer_start = time.time()
-        
-        if q_type == "web_search":
-            logger.log_actual("SEARCH", "Initiating Google Search API call...")
-            ai_start = time.time()
-            answer = "\n\n +++ 웹검색 실시 +++\n\n" + handle_web_search(user_input, st.session_state.context, hs_manager)
-            ai_time = time.time() - ai_start
-            logger.log_actual("SUCCESS", "Web search completed", f"{ai_time:.2f}s, {len(answer)} chars")
-            
-        elif q_type == "hs_classification":
-            logger.log_actual("AI", "Starting domestic HS classification search...")
-            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups parallel processing")
-            
-            # 5개 그룹별로 각각 처리하면서 로깅
-            group_answers = []
-            group_start = time.time()
-            
-            for i in range(5):
-                logger.log_actual("SEARCH", f"Group {i+1} data retrieval starting...")
-                group_data_start = time.time()
-                relevant = hs_manager.get_domestic_context_group(user_input, i)
-                group_data_time = time.time() - group_data_start
-                logger.log_actual("DATA", f"Group {i+1} data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
+def load_selected_packages(selected_package_ids, auto_process=False):
+    """선택된 패키지들만 로드 (캐시 지원) - 이전 패키지는 캐시에만 저장"""
+    if not selected_package_ids:
+        st.warning("선택된 패키지가 없습니다.")
+        return
+    
+    laws_dir = Path("./laws")
+    package_names = {
+        "customs_investigation": "관세조사",
+        "foreign_exchange_investigation": "외환조사", 
+        "foreign_trade": "대외무역",
+        "free_trade_agreement": "자유무역협정",
+        "refund": "환급"
+    }
+    
+    # 현재 로드된 데이터를 캐시에 저장 (이전 선택이 있었다면)
+    if st.session_state.selected_packages and st.session_state.collected_laws:
+        previous_cache_key = "_".join(sorted(st.session_state.selected_packages))
+        st.session_state.package_cache[previous_cache_key] = {
+            'collected_laws': st.session_state.collected_laws.copy(),
+            'law_data': st.session_state.law_data.copy(),
+            'embedding_data': st.session_state.embedding_data.copy()
+        }
+    
+    # 기존 데이터 초기화 (새로 선택된 패키지만 사용)
+    st.session_state.collected_laws = {}
+    st.session_state.law_data = {}
+    st.session_state.embedding_data = {}
+    
+    # 캐시 키 생성
+    cache_key = "_".join(sorted(selected_package_ids))
+    
+    # 캐시에서 로드 시도
+    if cache_key in st.session_state.package_cache:
+        if not auto_process:
+            with st.spinner("캐시에서 법령 패키지를 로드하는 중..."):
+                st.session_state.collected_laws = st.session_state.package_cache[cache_key]['collected_laws'].copy()
+                st.session_state.law_data = st.session_state.package_cache[cache_key]['law_data'].copy()
+                st.session_state.embedding_data = st.session_state.package_cache[cache_key]['embedding_data'].copy()
+                st.session_state.packages_loaded = True
+                st.session_state.selected_packages = selected_package_ids
                 
-                logger.log_actual("AI", f"Group {i+1} LLM processing...")
-                group_ai_start = time.time()
-                prompt = f"{st.session_state.context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt
-                )
-                group_answer = clean_text(response.text)
-                group_answers.append(group_answer)
-                group_ai_time = time.time() - group_ai_start
-                logger.log_actual("SUCCESS", f"Group {i+1} completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
-            
-            groups_total_time = time.time() - group_start
-            logger.log_actual("INFO", "All groups completed", f"Total: {groups_total_time:.2f}s")
-            
-            # Head Agent 처리
-            logger.log_actual("AI", "Head Agent consolidation starting...")
-            head_start = time.time()
-            head_prompt = f"{st.session_state.context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-            for idx, ans in enumerate(group_answers):
-                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-            head_prompt += f"\n사용자: {user_input}\n"
-            head_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=head_prompt
-            )
-            final_answer = clean_text(head_response.text)
-            head_time = time.time() - head_start
-            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
-            
-            answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + final_answer
-            
-        elif q_type == "overseas_hs":
-            logger.log_actual("AI", "Starting overseas HS classification search...")
-            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups (US/EU) parallel processing")
-            overseas_context = st.session_state.context + "\n(해외 HS 분류 사례 분석 모드)"
-            
-            # 5개 그룹별로 각각 처리하면서 로깅
-            group_answers = []
-            group_start = time.time()
-            
-            for i in range(5):
-                group_type = "US" if i < 3 else "EU"
-                logger.log_actual("SEARCH", f"Group {i+1} ({group_type}) data retrieval starting...")
-                group_data_start = time.time()
-                relevant = hs_manager.get_overseas_context_group(user_input, i)
-                group_data_time = time.time() - group_data_start
-                logger.log_actual("DATA", f"Group {i+1} ({group_type}) data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
-                
-                logger.log_actual("AI", f"Group {i+1} ({group_type}) LLM processing...")
-                group_ai_start = time.time()
-                prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt
-                )
-                group_answer = clean_text(response.text)
-                group_answers.append(group_answer)
-                group_ai_time = time.time() - group_ai_start
-                logger.log_actual("SUCCESS", f"Group {i+1} ({group_type}) completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
-            
-            groups_total_time = time.time() - group_start
-            logger.log_actual("INFO", "All overseas groups completed", f"Total: {groups_total_time:.2f}s")
-            
-            # Head Agent 처리
-            logger.log_actual("AI", "Head Agent consolidation starting...")
-            head_start = time.time()
-            head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-            for idx, ans in enumerate(group_answers):
-                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-            head_prompt += f"\n사용자: {user_input}\n"
-            head_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=head_prompt
-            )
-            final_answer = clean_text(head_response.text)
-            head_time = time.time() - head_start
-            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
-            
-            answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + final_answer
-            
-        elif q_type == "hs_manual":
-            logger.log_actual("AI", "Starting enhanced parallel HS manual analysis...")
-            ai_start = time.time()
-            answer = "\n\n +++ HS 해설서 분석 실시 (병렬 검색) +++ \n\n" + handle_hs_manual_with_parallel_search(user_input, st.session_state.context, hs_manager, logger)
-            ai_time = time.time() - ai_start
-            logger.log_actual("SUCCESS", "Enhanced HS manual analysis completed", f"{ai_time:.2f}s, {len(answer)} chars")
-            
-        elif q_type == "hs_manual_raw":
-            logger.log_actual("SEARCH", "Extracting HS codes...")
-            hs_codes = extract_hs_codes(user_input)
-            if hs_codes:
-                logger.log_actual("SUCCESS", f"Found {len(hs_codes)} HS codes", ", ".join(hs_codes))
-                logger.log_actual("DATA", "Retrieving raw HS explanations...")
-                raw_start = time.time()
-                raw_answer = clean_text(get_hs_explanations(hs_codes))
-                raw_time = time.time() - raw_start
-                answer = "\n\n +++ HS 해설서 원문 검색 실시 +++ \n\n" + raw_answer
-                logger.log_actual("SUCCESS", "Raw HS manual retrieved", f"{raw_time:.2f}s, {len(raw_answer)} chars")
-            else:
-                logger.log_actual("ERROR", "No valid HS codes found in input")
-                answer = "HS 코드를 찾을 수 없습니다. 4자리 HS 코드를 입력해주세요."
-
-        answer_time = time.time() - answer_start
-        logger.log_actual("SUCCESS", "Answer generation completed", f"{answer_time:.2f}s, {len(answer)} chars")
-        
-        total_time = time.time() - logger.start_time
-        logger.log_actual("INFO", "Process completed successfully", f"Total time: {total_time:.2f}s")
-        
-        # Return the answer for external processing
-        return answer
-        
-    except Exception as e:
-        logger.log_actual("ERROR", f"Exception occurred: {str(e)}")
-        logger.log_actual("ERROR", f"Error type: {type(e).__name__}")
-        raise e
-
-
-# 사이드바 설정 (main.py의 with st.sidebar: 부분 교체)
-with st.sidebar:
-    st.title("🚀 HS Chatbot")
-    st.markdown("""
-    ### 📊 HS 품목분류 전문 AI
-
-    **🤖 AI 자동분류**
-    - LLM 기반 질문 유형 자동 판별
-    - 최적 검색 방식 자동 선택
-
-    **🌐 웹 검색**  
-    - Google Search API 실시간 정보
-    - 시장동향, 뉴스, 산업현황
-
-    **🇰🇷 국내 HS 분류검색**
-    - 관세청 사례 1,000+ 데이터베이스
-    - Multi-Agent 5그룹 병렬 분석
-    - Head Agent 최종 취합
-
-    **🌍 해외 HS 분류검색**
-    - 미국/EU 관세청 데이터
-    - 국제 분류 동향 비교 분석
-
-    **📚 HS 해설서 분석** ⭐
-    - **병렬 검색 시스템**
-    - 관세율표 + 해설서 동시 검색
-    - 가중치 기반 통합 (40% + 60%)
-    - HIGH/MEDIUM 신뢰도 등급
-    - 실시간 프로세스 로깅
-
-    **📖 HS 해설서 원문**
-    - 특정 HS코드 해설서 조회
-    - 통칙/부/류/호 체계적 정리
-    
-    ---
-    
-    **💡 핵심 특징**
-    - Multi-Agent 병렬 처리
-    - 실시간 로깅으로 투명성 보장  
-    - 듀얼 패스 검색으로 정확도 향상
-    """)
-    
-    # 새로운 채팅 시작 버튼
-    if st.button("새로운 채팅 시작하기", type="primary"):
-        st.session_state.chat_history = []  # 채팅 기록 초기화
-        # 컨텍스트 초기화 (기본 컨텍스트 재사용)
-        st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
-
-질문 유형:
-1. 웹 검색(Web Search): 물품개요, 용도, 기술개발, 무역동향 등 일반 정보 탐색이 필요한 경우.
-2. HS 분류 검색(HS Classification Search): HS 코드, 품목분류, 관세, 세율 등 HS 코드 관련 정보가 필요한 경우.
-3. HS 해설서 분석(HS Manual Analysis): HS 해설서 본문 심층 분석이 필요한 경우.
-4. 해외 HS 분류(Overseas HS Classification): 해외(미국/EU) HS 분류 사례가 필요한 경우.
-
-중요 지침:
-1. 사용자가 질문하는 물품에 대해 관련어, 유사품목, 대체품목도 함께 고려하여 가장 적합한 HS 코드를 찾아주세요.
-2. 품목의 성분, 용도, 가공상태 등을 고려하여 상세히 설명해주세요.
-3. 사용자가 특정 HS code를 언급하며 질문하는 경우, 답변에 해당 HS code 해설서 분석 내용을 포함하여 답변해주세요.
-4. 관련 규정이나 판례가 있다면 함께 제시해주세요.
-5. 답변은 간결하면서도 전문적으로 제공해주세요.
-
-지금까지의 대화:
-"""
-        st.rerun()  # 페이지 새로고침
-
-# 메인 페이지 설정
-st.title("HS 품목분류 챗봇")
-st.write("HS 품목분류에 대해 질문해주세요!")
-
-# 질문 유형 선택 라디오 버튼
-selected_category = st.radio(
-    "질문 유형을 선택하세요:",
-    ["AI자동분류", "웹검색", "국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석", "HS해설서원문검색"],
-    index=0,  # 기본값: AI자동분류
-    horizontal=True,
-    key="category_radio"
-)
-st.session_state.selected_category = selected_category
-
-st.divider()  # 구분선 추가
-
-# 채팅 기록 표시
-for message in st.session_state.chat_history:
-    if message["role"] == "user":
-        st.markdown(f"""<div style='background-color: #e6f7ff; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>
-                   <strong>사용자:</strong> {message['content']}
-                   </div>""", unsafe_allow_html=True)
-    else:
-        # HS 해설서 원문인지 확인
-        if "+++ HS 해설서 원문 검색 실시 +++" in message['content']:
-            # 마크다운으로 렌더링하여 구조화된 형태로 표시
-            st.markdown("**품목분류 전문가:**")
-            st.markdown(message['content'])
+                total_laws = len(st.session_state.collected_laws)
+                total_articles = sum(len(law_info['data']) for law_info in st.session_state.collected_laws.values())
+                st.success(f"🚀 캐시에서 로드 완료: {total_laws}개 법령, {total_articles}개 조문")
         else:
-            st.markdown(f"""<div style='background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>
-                    <strong>품목분류 전문가:</strong> {message['content']}
-                    </div>""", unsafe_allow_html=True)
-
-
-# 하단 입력 영역 (Form 기반 입력)
-input_container = st.container()
-st.markdown("<div style='flex: 1;'></div>", unsafe_allow_html=True)
-
-with input_container:
-    # Form을 사용하여 안정적인 입력 처리
-    with st.form("query_form", clear_on_submit=True):
-        user_input = st.text_input(
-            "품목에 대해 질문하세요:", 
-            placeholder="여기에 입력 후 Enter 또는 전송 버튼 클릭"
-        )
+            # 자동 처리 시에는 메시지 없이 로드
+            st.session_state.collected_laws = st.session_state.package_cache[cache_key]['collected_laws'].copy()
+            st.session_state.law_data = st.session_state.package_cache[cache_key]['law_data'].copy()
+            st.session_state.embedding_data = st.session_state.package_cache[cache_key]['embedding_data'].copy()
+            st.session_state.packages_loaded = True
+            st.session_state.selected_packages = selected_package_ids
+        return
+    
+    # 캐시에 없으면 파일에서 로드
+    if not auto_process:
+        loading_msg = "선택된 법령 패키지를 로드하는 중..."
+    else:
+        loading_msg = "선택된 법령 패키지를 자동 로드하는 중..."
         
-        # 두 개의 컬럼으로 나누어 버튼을 오른쪽에 배치
-        col1, col2 = st.columns([4, 1])
-        with col2:
-            submit_button = st.form_submit_button("전송", use_container_width=True)
+    with st.spinner(loading_msg):
+        total_laws = 0
+        total_articles = 0
         
-        # 폼이 제출되고 입력값이 있을 때 처리
-        if submit_button and user_input and user_input.strip():
-            with st.expander("실시간 처리 과정 로그 보기", expanded=True):
-                try:
-                    # Process query with real-time logging
-                    answer = process_query_with_real_logging(user_input)
+        for package_id in selected_package_ids:
+            json_file = laws_dir / f"{package_id}.json"
+            package_name = package_names.get(package_id, package_id)
+            
+            if not json_file.exists():
+                st.error(f"❌ {package_name} 패키지 파일이 없습니다: {json_file}")
+                continue
+                
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    package_data = json.load(f)
+                
+                # 패키지 내 각 법령을 세션에 추가
+                for law_name, law_info in package_data.items():
+                    # 타입에 따른 분류
+                    if law_info['type'] == 'law':
+                        type_name = '법률 API'
+                    elif law_info['type'] == 'admin':
+                        type_name = '행정규칙 API'
+                    elif law_info['type'] == 'three_stage':
+                        type_name = '3단비교 API'
+                    else:
+                        type_name = '기타 API'
                     
-                    # Update chat history after successful processing
-                    st.session_state.chat_history.append({"role": "user", "content": user_input})
-                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                    st.session_state.context += f"\n사용자: {user_input}\n품목분류 전문가: {answer}\n"
+                    st.session_state.collected_laws[law_name] = {
+                        'type': type_name,
+                        'data': law_info['data'],
+                        'package': package_name
+                    }
+                    total_laws += 1
+                    total_articles += len(law_info['data'])
+                
+                if not auto_process:
+                    st.success(f"✅ {package_name} 패키지 로드 완료")
+                
+            except Exception as e:
+                st.error(f"❌ {package_name} 패키지 로드 실패: {str(e)}")
+        
+        st.session_state.packages_loaded = True
+        st.session_state.selected_packages = selected_package_ids
+        
+        if auto_process:
+            # 자동 처리인 경우 바로 데이터 변환까지 수행
+            process_all_loaded_laws(silent=True)
+            
+            # 캐시에 저장
+            st.session_state.package_cache[cache_key] = {
+                'collected_laws': st.session_state.collected_laws.copy(),
+                'law_data': st.session_state.law_data.copy(),
+                'embedding_data': st.session_state.embedding_data.copy()
+            }
+        else:
+            st.success(f"🎉 선택된 패키지 로드 완료: {total_laws}개 법령, {total_articles}개 조문")
+
+def process_all_loaded_laws(silent=False):
+    """로드된 모든 법령 데이터를 처리"""
+    if not st.session_state.collected_laws:
+        if not silent:
+            st.warning("로드된 법령 데이터가 없습니다.")
+        return
+    
+    if not silent:
+        spinner_msg = "법령 데이터를 처리하고 있습니다..."
+    else:
+        spinner_msg = "법령 데이터를 자동 처리하고 있습니다..."
+        
+    with st.spinner(spinner_msg):
+        st.session_state.law_data = {}
+        st.session_state.embedding_data = {}
+        
+        for name, law_info in st.session_state.collected_laws.items():
+            json_data = law_info['data']
+            result = process_json_data(name, json_data)
+            processed_name, vec, title_vec, mat, title_mat, chunks, chunk_count = result
+            
+            if vec is not None:
+                st.session_state.law_data[processed_name] = "processed"
+                st.session_state.embedding_data[processed_name] = (vec, title_vec, mat, title_mat, chunks)
+                if not silent:
+                    st.success(f"✅ {processed_name} 처리 완료 ({chunk_count}개 조항)")
+            else:
+                if not silent:
+                    st.error(f"❌ {processed_name} 처리 실패")
+        
+        if not silent:
+            st.success("모든 법령 데이터 처리가 완료되었습니다!")
+
+def start_new_chat():
+    """새 대화를 시작하는 함수"""
+    st.session_state.chat_history = []
+    st.success("새 대화가 시작되었습니다!")
+    st.rerun()
+
+# --- UI: 메인 ---
+st.title("📚 법령 통합 챗봇")
+
+# 메인 화면 상단에 패키지 선택 박스 (간단하게, main_ref.py 스타일)
+available_packages = get_available_packages()
+
+if available_packages:
+    st.markdown("---")
+    
+    # 패키지 선택 박스들을 횡으로 나열 (라디오 버튼으로 단일 선택)
+    cols = st.columns(len(available_packages) + 1)
+    
+    # 선택 옵션 생성 (선택 안함 포함)
+    package_options = ["선택 안함"] + [f"📂 {info['name']}" for info in available_packages.values()]
+    package_ids = [None] + list(available_packages.keys())
+    
+    # 현재 선택된 패키지의 인덱스 찾기
+    current_index = 0
+    if st.session_state.current_selected_packages:
+        for i, pkg_id in enumerate(package_ids[1:], 1):
+            if pkg_id in st.session_state.current_selected_packages:
+                current_index = i
+                break
+    
+    # 라디오 버튼으로 단일 선택
+    with cols[0]:
+        if st.button("🚫 선택 안함", type="secondary" if current_index != 0 else "primary"):
+            current_selection = []
+            st.session_state.current_selected_packages = []
+            st.session_state.packages_loaded = False
+            st.session_state.selected_packages = []
+            st.session_state.collected_laws = {}
+            st.session_state.law_data = {}
+            st.session_state.embedding_data = {}
+            st.rerun()
+    
+    current_selection = []
+    for i, (package_id, package_info) in enumerate(available_packages.items(), 1):
+        with cols[i]:
+            is_selected = package_id in st.session_state.current_selected_packages
+            button_type = "primary" if is_selected else "secondary"
+            
+            if st.button(f"📂 {package_info['name']}", type=button_type):
+                current_selection = [package_id]
+    
+    # 버튼 클릭으로 선택이 변경된 경우 처리
+    if current_selection and set(current_selection) != set(st.session_state.current_selected_packages):
+        st.session_state.current_selected_packages = current_selection
+        # 선택된 패키지가 있으면 자동으로 로드하고 처리 (캐시 포함)
+        # auto_process=True로 설정하여 챗봇용 데이터로 완전히 변환까지 수행
+        load_selected_packages(current_selection, auto_process=True)
+        st.rerun()
+
+# 사이드바 (항상 표시)
+with st.sidebar:
+    st.header("📦 법령 패키지 정보")
+    
+    # 패키지 상세 설명 (고정 내용)
+    with st.expander("📖 패키지 상세 설명", expanded=True):
+        st.markdown("""
+        **🏛️ 관세조사 패키지**
+        - 관세법, 관세법 시행령, 관세법 시행규칙
+        - 관세평가 운영에 관한 고시, 관세조사 운영에 관한 훈령
+        
+        **💱 외환조사 패키지**
+        - 외국환거래법, 외국환거래법 시행령
+        - 외국환거래규정
+        
+        **🌍 대외무역 패키지**
+        - 대외무역법, 대외무역법 시행령
+        - 대외무역관리규정
+        
+        **🤝 자유무역협정 패키지**
+        - 자유무역협정 이행을 위한 관세법의 특례에 관한 법률, 시행령, 시행규칙
+        - 사무처리 고시, 원산지 조사 운영 훈령, 원산지인증수출자 운영 고시
+        
+        **💰 환급 패키지**
+        - 수출용 원재료에 대한 관세 등 환급에 관한 특례법, 시행령, 시행규칙
+        - 환급사무처리 고시, 위탁가공 환급처리 예규, 환급사무 훈령 등
+        """)
+    
+    st.markdown("---")
+
+# 패키지가 로드되지 않은 경우 안내 메시지
+if not st.session_state.packages_loaded:
+    if not available_packages:
+        st.error("📁 ./laws 폴더에 패키지가 없습니다.")
+        st.info("💡 download_packages.py를 먼저 실행하여 법령 패키지를 다운로드하세요.")
+        st.code("python download_packages.py", language="bash")
+        st.stop()
+    
+    st.info("💡 위에서 사용할 법령 패키지를 선택하면 자동으로 로드됩니다.")
+
+else:
+    # 패키지가 로드된 경우 사이드바에 추가 정보 표시
+    with st.sidebar:
+        st.header("📊 로드된 데이터 현황")
+        
+        # 로드된 패키지 정보 표시
+        if st.session_state.collected_laws:
+            # 패키지별 그룹화
+            packages = {}
+            for law_name, law_info in st.session_state.collected_laws.items():
+                package = law_info.get('package', '기타')
+                if package not in packages:
+                    packages[package] = []
+                packages[package].append((law_name, len(law_info['data'])))
+            
+            # 현재 로드된 패키지 정보 표시
+            with st.expander("📋 현재 로드된 법령", expanded=True):
+                for package_name, laws in packages.items():
+                    st.subheader(f"📂 {package_name}")
+                    total_articles = sum(article_count for _, article_count in laws)
+                    st.caption(f"{len(laws)}개 법령, {total_articles}개 조문")
                     
-                    # Force rerun to display the new chat messages
-                    st.rerun()
+                    for law_name, article_count in laws:
+                        st.markdown(f"• **{law_name}** ({article_count}개 조문)")
+        
+        st.markdown("---")
+        
+        # 데이터 처리 상태 표시
+        if st.session_state.law_data:
+            st.success("✅ 챗봇 사용 준비 완료")
+            st.info(f"현재 {len(st.session_state.law_data)}개 법령 사용 가능")
+        
+        st.markdown("---")
+        st.header("💬 대화 관리")
+        if st.button("🔄 새 대화 시작", use_container_width=True):
+            start_new_chat()
+        
+        if st.session_state.chat_history:
+            st.info(f"현재 대화 수: {len([msg for msg in st.session_state.chat_history if msg['role'] == 'user'])}개")
+
+    # 검색 설정 패널 (패키지 로드된 경우에만 표시)
+    if st.session_state.packages_loaded:
+        with st.expander("⚙️ 검색 설정", expanded=True):
+            search_mode = st.radio(
+                "🔍 답변 참고 조문 검색 모드 선택",
+                options=["📄 내용 전용 모드(일반적인 경우)", "🤝 조문 제목+내용 균형 모드(각 조문 제목이 상세한 법령 검색에 적합)"],
+                index=0 if st.session_state.search_weights['title'] == 0.0 else 1,
+                help="균형 모드: 제목과 내용을 50:50으로 검색 | 내용 전용: 제목을 무시하고 내용만 검색"
+            )
+            
+            # 선택에 따라 가중치 설정
+            if "내용 전용 모드" in search_mode:
+                title_weight = 0.0
+                content_weight = 1.0
+            elif "균형 모드" in search_mode:
+                title_weight = 0.5
+                content_weight = 0.5
+            else:
+                title_weight = 0.0
+                content_weight = 1.0
+            
+            # 세션 상태 업데이트
+            if st.session_state.search_weights['title'] != title_weight:
+                st.session_state.search_weights = {
+                    'content': content_weight,
+                    'title': title_weight
+                }
+                st.success(f"검색 모드가 변경되었습니다: {search_mode}")
+        
+        st.markdown("---")
+        
+        # 탭으로 챗봇과 검색 기능 분리
+        tab1, tab2 = st.tabs(["💬 AI 챗봇", "🔍 법령 검색"])
+
+        with tab1:
+            if st.session_state.law_data:
+                st.info(f"현재 {len(st.session_state.law_data)}개의 법령이 처리되어 사용 가능합니다: {', '.join(st.session_state.law_data.keys())}")
+            
+            # 채팅 컨테이너
+            chat_container = st.container()
+            
+            with chat_container:
+                # 대화 히스토리 표시
+                for msg in st.session_state.chat_history:
+                    with st.chat_message(msg['role']):
+                        st.markdown(msg['content'])
+
+            # 질문 입력창
+            if user_input := st.chat_input("질문을 입력하세요"):
+                if not st.session_state.law_data:
+                    st.warning("먼저 사이드바에서 법령 패키지를 로드하고 처리해주세요.")
+                    st.stop()
+                
+                # 사용자 메시지를 히스토리에 추가하고 즉시 표시
+                st.session_state.chat_history.append({"role": "user", "content": user_input})
+                
+                # 채팅 컨테이너 내에서 새 메시지들을 렌더링
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(user_input)
                     
-                except Exception as e:
-                    st.error(f"처리 중 오류가 발생했습니다: {str(e)}")
+                    # 챗봇 답변 생성 로직
+                    with st.chat_message("assistant"):
+                        full_answer = ""
+                        
+                        try:
+                            with st.status("답변 생성 중...", expanded=True) as status:
+                                history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_history])
+                                search_weights = st.session_state.search_weights
+                                
+                                # 1. 질문 분석
+                                status.update(label="1/3: 질문 분석 중...", state="running")
+                                original_query, similar_queries, expanded_keywords = analyze_query(user_input, st.session_state.collected_laws, search_weights)
+                                
+                                with st.expander("🔍 쿼리 분석 결과"):
+                                    st.markdown(f"**원본 질문:** {original_query}")
+                                    st.markdown("**유사 질문:**")
+                                    st.markdown('\n'.join([f'- {q}' for q in similar_queries]))
+                                    st.markdown(f"**확장 키워드:** {expanded_keywords}")
+
+                                # 2. 법령별 답변 생성
+                                status.update(label="2/3: 법령별 답변 생성 중...", state="running")
+                                
+                                law_names = list(st.session_state.law_data.keys())
+                                
+                                # ThreadPoolExecutor로 병렬 처리 (최대 5개)
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(law_names), 5)) as executor:
+                                    futures = {
+                                        executor.submit(
+                                            get_agent_response,
+                                            law_name, user_input, history, st.session_state.embedding_data, expanded_keywords, search_weights
+                                        ): law_name for law_name in law_names
+                                    }
+                                
+                                agent_responses = []
+                                for future in concurrent.futures.as_completed(futures):
+                                    law_name, response = future.result()
+                                    agent_responses.append((law_name, response))
+                                    
+                                    # 완료된 법령별 답변을 바로 표시
+                                    with st.container():
+                                        st.markdown(f"**📚 {law_name}**")
+                                        st.markdown(response)
+
+                                # 3. 최종 답변 종합
+                                status.update(label="3/3: 최종 답변 종합 중...", state="running")
+                                status.update(label="✅ 답변 취합 완료", state="complete", expanded=False)
+
+                            # 최종 답변 스트리밍 표시
+                            st.markdown("---")
+                            st.markdown("### 🎯 **최종 통합 답변**")
+                            
+                            # 스트리밍 답변 표시용 플레이스홀더
+                            answer_placeholder = st.empty()
+                            
+                            # 스트리밍 답변 생성 및 표시
+                            for chunk in get_head_agent_response_stream(agent_responses, user_input, history):
+                                full_answer += chunk
+                                # 실시간으로 답변 업데이트
+                                answer_placeholder.markdown(full_answer + " ▌")
+                            
+                            # 최종 완성된 답변 표시
+                            answer_placeholder.markdown(full_answer)
+                            
+                            # 세션 히스토리에 저장
+                            if full_answer:
+                                st.session_state.chat_history.append({"role": "assistant", "content": full_answer})
+
+                        except Exception as e:
+                            error_msg = f"답변 생성 중 오류가 발생했습니다: {str(e)}"
+                            st.error(error_msg)
+                            st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+        
+        with tab2:
+            render_law_search_ui(st.session_state.collected_laws)
+
+# 초기 설정은 사용자 선택에 맡김
