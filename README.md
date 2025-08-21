@@ -174,10 +174,3 @@ HS_Chatbot/
 
 이 프로젝트는 MIT 라이선스를 따릅니다.
 
-## 📞 문의
-
-프로젝트에 대한 문의사항이나 개선 제안이 있으시면 이슈를 생성해 주세요.
-
----
-
-**Made with ❤️ for HS Classification Professionals**
