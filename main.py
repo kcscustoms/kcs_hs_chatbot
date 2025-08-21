@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from utils import HSDataManager, extract_hs_codes, clean_text, classify_question
-from utils import handle_web_search, handle_hs_classification_cases, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search
+from utils import handle_web_search, handle_hs_classification_cases, handle_overseas_hs, get_hs_explanations, handle_hs_manual_with_parallel_search, handle_hs_manual_with_user_codes
 
 # 환경 변수 로드 (.env 파일에서 API 키 등 설정값 로드)
 load_dotenv()
@@ -72,6 +72,9 @@ if 'context' not in st.session_state:
 
 지금까지의 대화:
 """
+
+if 'ai_analysis_results' not in st.session_state:
+    st.session_state.ai_analysis_results = []
 
 class RealTimeProcessLogger:
     def __init__(self, container):
@@ -155,99 +158,13 @@ def process_query_with_real_logging(user_input):
             logger.log_actual("SUCCESS", "Web search completed", f"{ai_time:.2f}s, {len(answer)} chars")
             
         elif q_type == "hs_classification":
-            logger.log_actual("AI", "Starting domestic HS classification search...")
-            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups parallel processing")
-            
-            # 5개 그룹별로 각각 처리하면서 로깅
-            group_answers = []
-            group_start = time.time()
-            
-            for i in range(5):
-                logger.log_actual("SEARCH", f"Group {i+1} data retrieval starting...")
-                group_data_start = time.time()
-                relevant = hs_manager.get_domestic_context_group(user_input, i)
-                group_data_time = time.time() - group_data_start
-                logger.log_actual("DATA", f"Group {i+1} data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
-                
-                logger.log_actual("AI", f"Group {i+1} LLM processing...")
-                group_ai_start = time.time()
-                prompt = f"{st.session_state.context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt
-                )
-                group_answer = clean_text(response.text)
-                group_answers.append(group_answer)
-                group_ai_time = time.time() - group_ai_start
-                logger.log_actual("SUCCESS", f"Group {i+1} completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
-            
-            groups_total_time = time.time() - group_start
-            logger.log_actual("INFO", "All groups completed", f"Total: {groups_total_time:.2f}s")
-            
-            # Head Agent 처리
-            logger.log_actual("AI", "Head Agent consolidation starting...")
-            head_start = time.time()
-            head_prompt = f"{st.session_state.context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-            for idx, ans in enumerate(group_answers):
-                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-            head_prompt += f"\n사용자: {user_input}\n"
-            head_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=head_prompt
-            )
-            final_answer = clean_text(head_response.text)
-            head_time = time.time() - head_start
-            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
-            
+            # Multi-Agent 분석 실행 (UI 컨테이너 없이)
+            final_answer = handle_hs_classification_cases(user_input, st.session_state.context, hs_manager, None)
             answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + final_answer
             
         elif q_type == "overseas_hs":
-            logger.log_actual("AI", "Starting overseas HS classification search...")
-            logger.log_actual("INFO", "Multi-Agent system initializing", "5 groups (US/EU) parallel processing")
-            overseas_context = st.session_state.context + "\n(해외 HS 분류 사례 분석 모드)"
-            
-            # 5개 그룹별로 각각 처리하면서 로깅
-            group_answers = []
-            group_start = time.time()
-            
-            for i in range(5):
-                group_type = "US" if i < 3 else "EU"
-                logger.log_actual("SEARCH", f"Group {i+1} ({group_type}) data retrieval starting...")
-                group_data_start = time.time()
-                relevant = hs_manager.get_overseas_context_group(user_input, i)
-                group_data_time = time.time() - group_data_start
-                logger.log_actual("DATA", f"Group {i+1} ({group_type}) data loaded", f"{len(relevant)} chars in {group_data_time:.2f}s")
-                
-                logger.log_actual("AI", f"Group {i+1} ({group_type}) LLM processing...")
-                group_ai_start = time.time()
-                prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt
-                )
-                group_answer = clean_text(response.text)
-                group_answers.append(group_answer)
-                group_ai_time = time.time() - group_ai_start
-                logger.log_actual("SUCCESS", f"Group {i+1} ({group_type}) completed", f"{group_ai_time:.2f}s, {len(group_answer)} chars")
-            
-            groups_total_time = time.time() - group_start
-            logger.log_actual("INFO", "All overseas groups completed", f"Total: {groups_total_time:.2f}s")
-            
-            # Head Agent 처리
-            logger.log_actual("AI", "Head Agent consolidation starting...")
-            head_start = time.time()
-            head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
-            for idx, ans in enumerate(group_answers):
-                head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
-            head_prompt += f"\n사용자: {user_input}\n"
-            head_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=head_prompt
-            )
-            final_answer = clean_text(head_response.text)
-            head_time = time.time() - head_start
-            logger.log_actual("SUCCESS", "Head Agent consolidation completed", f"{head_time:.2f}s, {len(final_answer)} chars")
-            
+            # Multi-Agent 분석 실행 (UI 컨테이너 없이)
+            final_answer = handle_overseas_hs(user_input, st.session_state.context, hs_manager, None)
             answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + final_answer
             
         elif q_type == "hs_manual":
@@ -311,11 +228,11 @@ with st.sidebar:
     - 국제 분류 동향 비교 분석
 
     **📚 HS 해설서 분석** ⭐
-    - **병렬 검색 시스템**
-    - 관세율표 + 해설서 동시 검색
-    - 가중치 기반 통합 (40% + 60%)
-    - HIGH/MEDIUM 신뢰도 등급
-    - 실시간 프로세스 로깅
+    - **사용자 제시 코드 비교 시스템**
+    - 각 HS코드별 품목분류표 + 해설서 분석
+    - 통칙 기반 체계적 비교
+    - Gemini AI 최적 코드 추천
+    - 실시간 프로세스 표시
 
     **📖 HS 해설서 원문**
     - 특정 HS코드 해설서 조회
@@ -332,6 +249,11 @@ with st.sidebar:
     # 새로운 채팅 시작 버튼
     if st.button("새로운 채팅 시작하기", type="primary"):
         st.session_state.chat_history = []  # 채팅 기록 초기화
+        # Multi-Agent 및 HS 해설서 분석 결과도 초기화
+        if 'ai_analysis_results' in st.session_state:
+            st.session_state.ai_analysis_results = []
+        if 'hs_manual_analysis_results' in st.session_state:
+            st.session_state.hs_manual_analysis_results = []
         # 컨텍스트 초기화 (기본 컨텍스트 재사용)
         st.session_state.context = """당신은 HS 품목분류 전문가로서 관세청에서 오랜 경력을 가진 전문가입니다. 사용자가 물어보는 품목에 대해 아래 네 가지 유형 중 하나로 질문을 분류하여 답변해주세요.
 
@@ -350,7 +272,7 @@ with st.sidebar:
 
 지금까지의 대화:
 """
-        st.rerun()  # 페이지 새로고침
+        st.success("✅ 새로운 채팅이 시작되었습니다!")
 
 # 메인 페이지 설정
 st.title("HS 품목분류 챗봇")
@@ -359,12 +281,42 @@ st.write("HS 품목분류에 대해 질문해주세요!")
 # 질문 유형 선택 라디오 버튼
 selected_category = st.radio(
     "질문 유형을 선택하세요:",
-    ["AI자동분류", "웹검색", "국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석", "HS해설서원문검색"],
+    [
+        "AI자동분류 (AI가 질문 유형을 자동 판별)",
+        "웹검색 (시장동향, 뉴스, 산업현황 검색)", 
+        "국내HS분류사례 검색 (관세청 분류사례 기반 HS코드 추천)",
+        "해외HS분류사례검색 (미국/EU 분류사례 비교분석)",
+        "HS해설서분석 (사용자 제시 HS코드들을 비교분석하여 최적 코드 추천)",
+        "HS해설서원문검색 (특정 HS코드의 해설서 원문 조회)"
+    ],
     index=0,  # 기본값: AI자동분류
-    horizontal=True,
+    horizontal=False,  # 세로 배열로 변경 (설명이 길어져서)
     key="category_radio"
 )
-st.session_state.selected_category = selected_category
+
+# 선택된 카테고리에서 실제 카테고리명 추출
+category_mapping = {
+    "AI자동분류 (AI가 질문 유형을 자동 판별)": "AI자동분류",
+    "웹검색 (시장동향, 뉴스, 산업현황 검색)": "웹검색",
+    "국내HS분류사례 검색 (관세청 분류사례 기반 HS코드 추천)": "국내HS분류사례 검색",
+    "해외HS분류사례검색 (미국/EU 분류사례 비교분석)": "해외HS분류사례검색",
+    "HS해설서분석 (사용자 제시 HS코드들을 비교분석하여 최적 코드 추천)": "HS해설서분석",
+    "HS해설서원문검색 (특정 HS코드의 해설서 원문 조회)": "HS해설서원문검색"
+}
+actual_category = category_mapping[selected_category]
+st.session_state.selected_category = actual_category
+
+# 선택된 유형에 따른 예시 질문 표시
+example_messages = {
+    "AI자동분류": "💡 **예시**: '플라스틱 용기 분류', '반도체 시장 동향', '미국 자동차 부품 분류사례' 등 자유롭게 질문하세요",
+    "웹검색": "💡 **예시**: '반도체 시장 동향', '전기차 배터리 최신 기술', 'AI 칩셋 산업 현황'",
+    "국내HS분류사례 검색": "💡 **예시**: '플라스틱 용기는 어떤 HS코드로 분류되나요?', '자동차 엔진 부품의 HS코드', '화장품 용기 분류'",
+    "해외HS분류사례검색": "💡 **예시**: '미국에서 전자제품 분류 기준', 'EU 화학제품 분류사례', '해외 의료기기 분류 동향'",
+    "HS해설서분석": "💡 **예시**: '3923, 3924, 3926 중에서 플라스틱 용기 분류', '8471, 8472 중 컴퓨터 부품 분류', '6203, 6204, 6211 중 의류 분류'",
+    "HS해설서원문검색": "💡 **예시**: '3911', '391190', '8471' (HS코드만 입력하세요)"
+}
+
+st.info(example_messages[actual_category])
 
 st.divider()  # 구분선 추가
 
@@ -375,8 +327,76 @@ for message in st.session_state.chat_history:
                    <strong>사용자:</strong> {message['content']}
                    </div>""", unsafe_allow_html=True)
     else:
+        # 분석 과정이 있는 경우 expander 표시
+        if any(keyword in message['content'] for keyword in ["+++ HS 분류사례 검색 실시 +++", "+++ 해외 HS 분류 검색 실시 +++", "+++ HS 해설서 분석 실시 (병렬 검색) +++", "+++ HS 해설서 분석 실시 (사용자 제시 코드) +++"]):
+            # AI 분석 과정 expander 표시 (채팅 기록에서도 항상 표시)
+            with st.expander("🔍 **AI 분석 과정 보기**", expanded=False):
+                if "+++ HS 해설서 분석 실시 (사용자 제시 코드) +++" in message['content']:
+                    # 새로운 사용자 제시 코드 분석의 경우
+                    st.info("🔍 **사용자 제시 HS코드 기반으로 분석되었습니다**")
+                    st.markdown("""
+                    **분석 과정:**
+                    1. 📝 사용자 질문에서 HS코드 추출
+                    2. 📊 각 HS코드별 품목분류표 정보 수집
+                    3. 📚 각 HS코드별 해설서 정보 수집 및 요약
+                    4. 📋 HS 분류 통칙 준비
+                    5. 🧠 최종 AI 비교 분석 (Gemini 2.5)
+                    """)
+                elif "+++ HS 해설서 분석 실시 (병렬 검색) +++" in message['content']:
+                    # HS 해설서 분석의 경우 - 저장된 분석 결과 표시
+                    if hasattr(st.session_state, 'hs_manual_analysis_results') and st.session_state.hs_manual_analysis_results:
+                        # 가장 최근 분석 결과 표시
+                        latest_result = st.session_state.hs_manual_analysis_results[-1]
+                        search_results = latest_result.get('search_results', [])
+                        
+                        st.success("✅ **병렬 검색 완료**")
+                        st.markdown("### 🎯 **상위 HS코드 후보**")
+                        
+                        for i, result in enumerate(search_results, 1):
+                            confidence_color = "🟢" if result['confidence'] == 'HIGH' else "🟡"
+                            st.markdown(f"{confidence_color} **후보 {i}: HS코드 {result['hs_code']}** (신뢰도: {result['confidence']})")
+                            
+                            col1, col2 = st.columns([1, 2])
+                            with col1:
+                                st.write(f"**최종점수**: {result['final_score']:.3f}")
+                                st.write(f"**검색경로**: {', '.join(result['sources'])}")
+                            with col2:
+                                if result['tariff_name']:
+                                    st.write(f"**관세율표 품목명**: {result['tariff_name']}")
+                                if result.get('manual_summary'):
+                                    st.write(f"**📖 해설서 요약**:")
+                                    st.text(result['manual_summary'][:200] + "...")
+                            
+                            st.divider()
+                    else:
+                        st.info("🔍 **병렬 검색 시스템으로 분석되었습니다**")
+                        st.markdown("""
+                        **분석 과정:**
+                        1. 📊 관세율표 유사도 검색 (40% 가중치)
+                        2. 📚 해설서 직접 검색 (60% 가중치)  
+                        3. 🤖 각 후보 해설서 내용 요약 (Gemini 2.0)
+                        4. 🧠 통합 분석 및 최종 추천 (Gemini 2.5)
+                        5. ✅ 신뢰도 평가 (HIGH/MEDIUM)
+                        """)
+                elif st.session_state.ai_analysis_results:
+                    # Multi-Agent 분석의 경우 - 저장된 결과 표시
+                    for result in st.session_state.ai_analysis_results:
+                        emoji = "🤖" if result['type'] == 'domestic' else "🌐"
+                        st.success(f"{emoji} **그룹 {result['group_id']+1} AI 분석 완료** ({result['processing_time']:.1f}초)")
+                        with st.container():
+                            st.write(f"⏰ {result['start_time']}")
+                            st.markdown("**분석 결과:**")
+                            st.info(result['answer'])
+                            st.divider()
+                else:
+                    st.info("분석 과정 정보가 저장되지 않았습니다.")
+            
+            # 최종 답변 표시 (마크다운으로 렌더링)
+            st.markdown("**품목분류 전문가:**")
+            st.markdown(message['content'])
+        
         # HS 해설서 원문인지 확인
-        if "+++ HS 해설서 원문 검색 실시 +++" in message['content']:
+        elif "+++ HS 해설서 원문 검색 실시 +++" in message['content']:
             # 마크다운으로 렌더링하여 구조화된 형태로 표시
             st.markdown("**품목분류 전문가:**")
             st.markdown(message['content'])
@@ -393,9 +413,19 @@ st.markdown("<div style='flex: 1;'></div>", unsafe_allow_html=True)
 with input_container:
     # Form을 사용하여 안정적인 입력 처리
     with st.form("query_form", clear_on_submit=True):
+        # 선택된 유형에 따른 placeholder 메시지
+        placeholders = {
+            "AI자동분류": "예: '플라스틱 용기 분류', '반도체 동향' 등 자유롭게 질문하세요",
+            "웹검색": "예: '반도체 시장 동향', '전기차 산업 현황'",
+            "국내HS분류사례 검색": "예: '플라스틱 용기 HS코드', '자동차 부품 분류'",
+            "해외HS분류사례검색": "예: '미국 전자제품 분류', 'EU 화학제품 사례'",
+            "HS해설서분석": "예: '3923, 3924, 3926 중 플라스틱 용기 분류', '8471, 8472 중 컴퓨터 분류'",
+            "HS해설서원문검색": "예: '3911' 또는 '391190' (HS코드만 입력)"
+        }
+        
         user_input = st.text_input(
             "품목에 대해 질문하세요:", 
-            placeholder="여기에 입력 후 Enter 또는 전송 버튼 클릭"
+            placeholder=placeholders.get(st.session_state.selected_category, "여기에 입력 후 Enter 또는 전송 버튼 클릭")
         )
         
         # 두 개의 컬럼으로 나누어 버튼을 오른쪽에 배치
@@ -405,18 +435,54 @@ with input_container:
         
         # 폼이 제출되고 입력값이 있을 때 처리
         if submit_button and user_input and user_input.strip():
-            with st.expander("실시간 처리 과정 로그 보기", expanded=True):
-                try:
-                    # Process query with real-time logging
-                    answer = process_query_with_real_logging(user_input)
+            selected_category = st.session_state.selected_category
+            
+            # HS Manager 인스턴스 가져오기
+            hs_manager = get_hs_manager()
+            
+            # 분석 과정 표시가 필요한 유형들
+            if selected_category in ["국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석"]:
+                if selected_category in ["국내HS분류사례 검색", "해외HS분류사례검색"]:
+                    st.session_state.ai_analysis_results = []  # Multi-Agent용 결과 초기화
+                analysis_expander = st.expander("🔍 **AI 분석 과정 보기**", expanded=True)
+            
+            try:
+                # 분석 과정 표시 방식 분기
+                if selected_category == "HS해설서분석":
+                    # HS 해설서 분석은 사용자 제시 코드 기반 분석 (더미 로거 생성)
+                    class DummyLogger:
+                        def log_actual(self, level, message, data=None):
+                            pass  # UI 표시용이므로 로깅은 생략
                     
-                    # Update chat history after successful processing
-                    st.session_state.chat_history.append({"role": "user", "content": user_input})
-                    st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                    st.session_state.context += f"\n사용자: {user_input}\n품목분류 전문가: {answer}\n"
-                    
-                    # Force rerun to display the new chat messages
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"처리 중 오류가 발생했습니다: {str(e)}")
+                    dummy_logger = DummyLogger()
+                    final_answer = handle_hs_manual_with_user_codes(user_input, st.session_state.context, hs_manager, dummy_logger, analysis_expander)
+                    answer = "\n\n +++ HS 해설서 분석 실시 (사용자 제시 코드) +++ \n\n" + final_answer
+                elif selected_category not in ["국내HS분류사례 검색", "해외HS분류사례검색"]:
+                    # 기타 유형은 로그 패널 표시
+                    with st.expander("실시간 처리 과정 로그 보기", expanded=True):
+                        answer = process_query_with_real_logging(user_input)
+                else:
+                    # Multi-Agent 분석용 특별 처리
+                    if selected_category == "국내HS분류사례 검색":
+                        # utils 함수를 직접 호출하되 expander 컨테이너 전달
+                        final_answer = handle_hs_classification_cases(user_input, st.session_state.context, hs_manager, analysis_expander)
+                        answer = "\n\n +++ HS 분류사례 검색 실시 +++\n\n" + final_answer
+                    elif selected_category == "해외HS분류사례검색":
+                        final_answer = handle_overseas_hs(user_input, st.session_state.context, hs_manager, analysis_expander)
+                        answer = "\n\n +++ 해외 HS 분류 검색 실시 +++\n\n" + final_answer
+                
+                # Update chat history after successful processing
+                st.session_state.chat_history.append({"role": "user", "content": user_input})
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                st.session_state.context += f"\n사용자: {user_input}\n품목분류 전문가: {answer}\n"
+                
+                # 분석 과정이 표시된 유형들의 최종 답변 표시 (마크다운으로 렌더링)
+                if selected_category in ["국내HS분류사례 검색", "해외HS분류사례검색", "HS해설서분석"]:
+                    st.markdown("**품목분류 전문가:**")
+                    st.markdown(answer)
+                
+                # Force rerun to display the new chat messages
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"처리 중 오류가 발생했습니다: {str(e)}")

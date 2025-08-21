@@ -344,8 +344,9 @@ def lookup_hscode(hs_code, json_file):
         chapter_key = f"제{int(hs_code[:2])}류"
         chapter_explanation = next((g for g in data if g.get('header2') == chapter_key), chapter_explanation)
 
-        # 2) 호 key: "00.00"
-        sub_key = f"{hs_code[:2]}.{hs_code[2:]}"
+        # 2) 호 key: "00.00" (4자리까지만 사용)
+        hs_4digit = hs_code[:4]  # 4자리까지만 추출
+        sub_key = f"{hs_4digit[:2]}.{hs_4digit[2:]}"
         sub_explanation = next((g for g in data if g.get('header2') == sub_key), sub_explanation)
 
         # 3) 부(部) key: "제00부"
@@ -379,6 +380,192 @@ def get_hs_explanations(hs_codes):
             all_explanations += "---\n"  # 구분선 추가
     
     return all_explanations
+
+def get_tariff_info_for_codes(hs_codes):
+    """HS코드들에 대한 품목분류표 정보 수집"""
+    tariff_info = {}
+    
+    try:
+        with open('knowledge/hstable.json', 'r', encoding='utf-8') as f:
+            tariff_data = json.load(f)
+        
+        for code in hs_codes:
+            # 4자리 HS코드로 매칭 (예: 3923 또는 39.23)
+            code_4digit = code[:4] if len(code) >= 4 else code
+            code_with_dot = f"{code_4digit[:2]}.{code_4digit[2:]}"
+            
+            for item in tariff_data:
+                item_code = item.get('품목번호', '')
+                if item_code.startswith(code_4digit) or item_code.startswith(code_with_dot):
+                    tariff_info[code] = {
+                        'korean_name': item.get('한글품명', ''),
+                        'english_name': item.get('영문품명', ''),
+                        'full_code': item_code
+                    }
+                    break
+    except Exception as e:
+        print(f"Tariff table loading error: {e}")
+    
+    return tariff_info
+
+def get_manual_info_for_codes(hs_codes, logger):
+    """HS코드들에 대한 해설서 정보 수집 및 요약"""
+    manual_info = {}
+    
+    for code in hs_codes:
+        try:
+            # lookup_hscode 함수 재사용
+            part_exp, chapter_exp, sub_exp = lookup_hscode(code, 'knowledge/grouped_11_end.json')
+            
+            # 해설서 내용 조합
+            full_content = ""
+            if part_exp and part_exp.get('text'):
+                full_content += f"부 해설: {part_exp['text']}\n\n"
+            if chapter_exp and chapter_exp.get('text'):
+                full_content += f"류 해설: {chapter_exp['text']}\n\n"
+            if sub_exp and sub_exp.get('text'):
+                full_content += f"호 해설: {sub_exp['text']}\n\n"
+            
+            # 1000자 초과 시 요약
+            if len(full_content) > 1000:
+                logger.log_actual("AI", f"Summarizing manual content for HS{code}...")
+                summary_prompt = f"""다음 HS 해설서 내용을 1000자 이내로 핵심 내용만 요약해주세요:
+
+HS코드: {code}
+해설서 내용:
+{full_content}
+
+요약 시 포함할 내용:
+- 주요 품목 범위
+- 포함/제외 품목
+- 분류 기준
+- 핵심 특징
+
+간결하고 정확하게 요약해주세요."""
+                
+                try:
+                    summary_response = client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=summary_prompt
+                    )
+                    manual_info[code] = {
+                        'content': clean_text(summary_response.text),
+                        'summary_used': True
+                    }
+                    logger.log_actual("SUCCESS", f"HS{code} manual summarized", f"{len(manual_info[code]['content'])} chars")
+                except Exception as e:
+                    logger.log_actual("ERROR", f"HS{code} summary failed: {str(e)}")
+                    manual_info[code] = {
+                        'content': full_content[:1000] + "...",
+                        'summary_used': False
+                    }
+            else:
+                manual_info[code] = {
+                    'content': full_content,
+                    'summary_used': False
+                }
+        
+        except Exception as e:
+            logger.log_actual("ERROR", f"HS{code} manual loading failed: {str(e)}")
+            manual_info[code] = {
+                'content': "해설서 정보를 찾을 수 없습니다.",
+                'summary_used': False
+            }
+    
+    return manual_info
+
+def prepare_general_rules():
+    """HS 분류 통칙 준비"""
+    try:
+        with open('knowledge/통칙_grouped.json', 'r', encoding='utf-8') as f:
+            rules_data = json.load(f)
+        
+        rules_text = "HS 분류 통칙:\n\n"
+        for i, rule in enumerate(rules_data[:6], 1):  # 통칙 1~6
+            rules_text += f"통칙 {i}: {rule.get('text', '')}\n\n"
+        
+        return rules_text
+    except Exception as e:
+        return "통칙 정보를 로드할 수 없습니다."
+
+def analyze_user_provided_codes(user_input, hs_codes, tariff_info, manual_info, general_rules, context):
+    """사용자 제시 HS코드들에 대한 최종 AI 분석"""
+    
+    # HS 해설서 분석 전용 맞춤형 프롬프트
+    manual_analysis_context = """당신은 HS 해설서 및 품목분류표 전문 분석가입니다.
+
+역할과 목표:
+- 사용자가 제시한 여러 HS코드 중 가장 적합한 코드 선택
+- 품목분류표 품명과 HS 해설서 내용을 기반으로 한 체계적 비교
+- HS 통칙을 적용한 논리적 분류 근거 제시
+
+분석 방법:
+- **각 코드별 개별 분석**: 품목분류표 품명과 해설서 내용 검토
+- **비교 분석**: 사용자 물품과의 적합성 비교
+- **통칙 적용**: 해당되는 HS 통칙과 적용 근거
+- **최종 추천**: 가장 적합한 HS코드와 명확한 선택 이유
+
+답변 구성요소:
+1. **최적 HS코드 추천**: 가장 적합한 코드와 선택 이유
+2. **각 코드별 분석**: 개별 평가 및 적합성 판단
+3. **통칙 적용**: 관련 통칙과 적용 근거
+4. **최종 결론**: 추천 코드와 주의사항
+
+사용자가 제시한 HS코드를 중심으로 정확하고 전문적인 비교 분석을 제공해주세요."""
+    
+    # 분석용 프롬프트 구성
+    analysis_prompt = f"""{manual_analysis_context}
+
+{general_rules}
+
+사용자가 제시한 HS코드별 상세 정보:
+
+"""
+    
+    for code in hs_codes:
+        analysis_prompt += f"""
+=== HS코드 {code} ===
+품목분류표 정보:
+- 국문품명: {tariff_info.get(code, {}).get('korean_name', 'N/A')}
+- 영문품명: {tariff_info.get(code, {}).get('english_name', 'N/A')}
+
+해설서 정보:
+{manual_info.get(code, {}).get('content', 'N/A')}
+
+"""
+    
+    analysis_prompt += f"""
+사용자 질문: {user_input}
+
+위의 HS 분류 통칙과 각 HS코드별 상세 정보를 바탕으로 다음을 포함하여 답변해주세요:
+
+1. **최적 HS코드 추천**
+   - 사용자가 제시한 HS코드 중 가장 적합한 코드 선택
+   - 선택 이유와 근거 제시
+
+2. **각 코드별 분석**
+   - 각 HS코드가 사용자 물품에 적합한지 평가
+   - 품목분류표 품명과 해설서 내용 기반 분석
+
+3. **통칙 적용**
+   - 해당되는 HS 통칙과 적용 근거
+   - 분류 시 고려사항
+
+4. **최종 결론**
+   - 추천 HS코드와 분류 근거
+   - 주의사항 및 추가 고려사항
+
+전문적이면서도 이해하기 쉽게 답변해주세요."""
+    
+    # Gemini AI 분석 수행
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=analysis_prompt
+        )
+        return clean_text(response.text)
+    except Exception as e:
+        return f"AI 분석 중 오류가 발생했습니다: {str(e)}"
 
 class TariffTableSearcher:
     def __init__(self):
@@ -434,7 +621,7 @@ class ParallelHSSearcher:
         self.hs_manager = hs_manager
         self.tariff_searcher = TariffTableSearcher()
     
-    def parallel_search(self, query, logger):
+    def parallel_search(self, query, logger, ui_container=None):
         """병렬적 HS코드 검색"""
         
         # 경로 1: 관세율표 → 해설서 (2단계)
@@ -510,19 +697,51 @@ class ParallelHSSearcher:
             return None
     
     def direct_manual_search(self, query, logger):
-        """경로 2: 해설서 직접 검색 (기존 방법)"""
+        """경로 2: 해설서 직접 검색"""
         manual_start = time.time()
         
-        # 기존 multi-agent 방식 활용
+        # 해설서 데이터에서 직접 검색
         direct_results = []
-        for i in range(5):  # 5개 그룹 검색
-            group_results = self.hs_manager.search_domestic_group(query, i, max_results=2)
-            for result in group_results:
-                direct_results.append({
-                    'source_group': i,
-                    'content': result,
-                    'source': 'direct_manual'
-                })
+        try:
+            with open('knowledge/grouped_11_end.json', 'r', encoding='utf-8') as f:
+                manual_data = json.load(f)
+            
+            # 쿼리 키워드 추출
+            query_keywords = self.extract_keywords_from_query(query)
+            
+            # 해설서 텍스트에서 매칭되는 항목 찾기
+            for item in manual_data:
+                text_content = item.get('text', '')
+                header1 = item.get('header1', '')
+                header2 = item.get('header2', '')
+                
+                # 텍스트 내용과 헤더에서 키워드 매칭
+                match_score = 0
+                full_text = f"{header1} {header2} {text_content}".lower()
+                
+                for keyword in query_keywords:
+                    if keyword.lower() in full_text:
+                        match_score += 1
+                
+                if match_score > 0:
+                    # HS코드 추출 (header2에서)
+                    hs_codes = self.extract_hs_from_header(header2)
+                    
+                    direct_results.append({
+                        'hs_codes': hs_codes,
+                        'content': item,
+                        'match_score': match_score,
+                        'text_content': text_content,
+                        'source': 'direct_manual'
+                    })
+            
+            # 매칭 점수순으로 정렬하여 상위 10개만 선택
+            direct_results.sort(key=lambda x: x['match_score'], reverse=True)
+            direct_results = direct_results[:10]
+            
+        except Exception as e:
+            logger.log_actual("ERROR", f"Manual search error: {str(e)}")
+            direct_results = []
         
         manual_time = time.time() - manual_start
         logger.log_actual("SUCCESS", f"Direct manual search completed", 
@@ -530,9 +749,35 @@ class ParallelHSSearcher:
         
         return direct_results
     
+    def extract_keywords_from_query(self, query):
+        """쿼리에서 키워드 추출"""
+        import re
+        # 특수문자 제거 및 공백 기준 분리
+        words = re.sub(r'[^\w\s]', ' ', query).split()
+        # 중복 제거 및 길이 2 이상인 단어만 선택
+        return list(set(word for word in words if len(word) >= 2))
+    
+    def extract_hs_from_header(self, header):
+        """해설서 헤더에서 HS코드 추출"""
+        import re
+        # "39.11" 형태의 HS코드 패턴 찾기
+        hs_pattern = re.findall(r'(\d{2})\.(\d{2})', header)
+        if hs_pattern:
+            return [f"{code[0]}{code[1]}" for code in hs_pattern]
+        
+        # "제39류" 형태에서 류 번호 추출
+        chapter_pattern = re.findall(r'제(\d+)류', header)
+        if chapter_pattern:
+            return [f"{chapter:0>2}00" for chapter in chapter_pattern]
+        
+        return []
+    
     def extract_hs_codes_from_content(self, content):
         """해설서 내용에서 HS코드 추출"""
-        if isinstance(content, dict):
+        # 새로운 direct_manual_search 결과 구조에 맞게 수정
+        if isinstance(content, dict) and 'hs_codes' in content:
+            return content['hs_codes'][:3]  # 최대 3개만
+        elif isinstance(content, dict):
             text_content = json.dumps(content, ensure_ascii=False)
         else:
             text_content = str(content)
@@ -627,27 +872,252 @@ class ParallelHSSearcher:
             
             context += f"검색경로: {', '.join(result['sources'])}\n"
             
-            if result['manual_content']:
-                context += f"해설서 내용:\n{result['manual_content'][:500]}...\n"
+            if result.get('manual_summary'):
+                context += f"해설서 요약:\n{result['manual_summary']}\n"
+            elif result['manual_content']:
+                context += f"해설서 내용:\n{result['manual_content'][:1000]}...\n"
             
             context += "\n"
         
         return context
 
-def handle_hs_manual_with_parallel_search(user_input, context, hs_manager, logger):
+def handle_hs_manual_with_user_codes(user_input, context, hs_manager, logger, ui_container=None):
+    """사용자 제시 HS코드 기반 해설서 분석"""
+    import streamlit as st
+    
+    # UI 컨테이너가 제공된 경우 분석 과정 표시
+    if ui_container:
+        with ui_container:
+            st.info("🔍 **사용자 제시 HS코드 분석 시작**")
+            progress_bar = st.progress(0, text="HS코드 추출 중...")
+            analysis_container = st.container()
+    
+    # 1단계: 사용자 제시 HS코드 추출
+    logger.log_actual("INFO", "Extracting user-provided HS codes...")
+    extracted_codes = extract_hs_codes(user_input)
+    
+    if not extracted_codes:
+        logger.log_actual("ERROR", "No HS codes found in user input")
+        if ui_container:
+            progress_bar.progress(1.0, text="분석 완료!")
+            st.error("❌ **HS코드를 찾을 수 없습니다**")
+            st.info("💡 **사용법**: '3923, 3924, 3926 중에서 플라스틱 용기를 분류해주세요' 형태로 질문하세요")
+        return "HS코드를 찾을 수 없습니다. 분석할 HS코드를 포함하여 질문해주세요."
+    
+    logger.log_actual("SUCCESS", f"Found {len(extracted_codes)} HS codes", f"{', '.join(extracted_codes)}")
+    
+    if ui_container:
+        progress_bar.progress(0.2, text=f"{len(extracted_codes)}개 HS코드 발견...")
+        with analysis_container:
+            st.success(f"✅ **{len(extracted_codes)}개 HS코드 발견**: {', '.join(extracted_codes)}")
+    
+    # 2단계: 각 HS코드별 품목분류표 정보 수집
+    logger.log_actual("INFO", "Collecting tariff table information...")
+    tariff_info = get_tariff_info_for_codes(extracted_codes)
+    
+    if ui_container:
+        progress_bar.progress(0.4, text="품목분류표 정보 수집 중...")
+    
+    # 3단계: 각 HS코드별 해설서 정보 수집 및 요약
+    logger.log_actual("INFO", "Collecting and summarizing manual information...")
+    manual_info = get_manual_info_for_codes(extracted_codes, logger)
+    
+    if ui_container:
+        progress_bar.progress(0.6, text="해설서 정보 수집 및 요약 중...")
+        
+        # 수집된 정보 표시
+        with analysis_container:
+            st.markdown("### 📊 **HS코드별 상세 정보**")
+            
+            for code in extracted_codes:
+                st.markdown(f"#### 🔢 **HS코드: {code}**")
+                
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if code in tariff_info:
+                        st.write(f"**📋 국문품명**: {tariff_info[code].get('korean_name', 'N/A')}")
+                        st.write(f"**📋 영문품명**: {tariff_info[code].get('english_name', 'N/A')}")
+                
+                with col2:
+                    if code in manual_info:
+                        st.write(f"**📚 해설서**: 수집 완료")
+                        if manual_info[code].get('summary_used'):
+                            st.write(f"**🤖 요약**: 적용됨")
+                
+                st.divider()
+    
+    # 4단계: 통칙 준비
+    logger.log_actual("INFO", "Preparing general rules...")
+    general_rules = prepare_general_rules()
+    
+    if ui_container:
+        progress_bar.progress(0.8, text="최종 AI 분석 준비 중...")
+    
+    # 5단계: 최종 AI 분석
+    logger.log_actual("AI", "Starting final AI analysis...")
+    final_answer = analyze_user_provided_codes(user_input, extracted_codes, tariff_info, manual_info, general_rules, context)
+    
+    if ui_container:
+        progress_bar.progress(1.0, text="분석 완료!")
+        st.success("🧠 **AI 전문가 분석이 완료되었습니다**")
+        st.info("📋 **아래에서 최종 답변을 확인하세요**")
+    
+    logger.log_actual("SUCCESS", "User-provided codes analysis completed", f"{len(final_answer)} chars")
+    return final_answer
+
+def handle_hs_manual_with_parallel_search(user_input, context, hs_manager, logger, ui_container=None):
     """병렬 검색을 활용한 HS 해설서 분석"""
+    import streamlit as st
+    
+    # UI 컨테이너가 제공된 경우 분석 과정 표시
+    if ui_container:
+        with ui_container:
+            st.info("🔍 **HS 해설서 병렬 분석 시작**")
+            progress_bar = st.progress(0, text="병렬 검색 진행 중...")
+            analysis_container = st.container()
     
     # 병렬 검색 수행
     parallel_searcher = ParallelHSSearcher(hs_manager)
-    search_results = parallel_searcher.parallel_search(user_input, logger)
+    search_results = parallel_searcher.parallel_search(user_input, logger, ui_container)
+    
+    # UI 업데이트 - 병렬 검색 결과 먼저 표시
+    if ui_container:
+        progress_bar.progress(0.6, text="병렬 검색 결과 분석 중...")
+        
+        # 1단계: 후보 코드 선정 과정 표시
+        with analysis_container:
+            st.success("✅ **병렬 검색 완료**")
+            st.markdown("### 🎯 **상위 HS코드 후보 선정**")
+            
+            for i, result in enumerate(search_results, 1):
+                confidence_color = "🟢" if result['confidence'] == 'HIGH' else "🟡"
+                st.markdown(f"{confidence_color} **후보 {i}: HS코드 {result['hs_code']}** (신뢰도: {result['confidence']})")
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.write(f"**최종점수**: {result['final_score']:.3f}")
+                    st.write(f"**검색경로**: {', '.join(result['sources'])}")
+                with col2:
+                    if result['tariff_name']:
+                        st.write(f"**관세율표 품목명**: {result['tariff_name']}")
+                    if result['manual_content']:
+                        st.write(f"**📖 해설서 원문**: 발견됨 (요약 예정)")
+                
+                st.divider()
     
     # 결과를 컨텍스트로 변환
     enhanced_context = parallel_searcher.create_enhanced_context(search_results)
     
+    # 각 후보의 해설서 내용 요약 (5회 API 호출)
+    if ui_container:
+        progress_bar.progress(0.7, text="해설서 내용 요약 중...")
+    
+    logger.log_actual("AI", "Starting manual content summarization...")
+    summary_start = time.time()
+    
+    for i, result in enumerate(search_results):
+        if result['manual_content']:
+            summary_prompt = f"""다음 HS 해설서 내용을 1000자 이내로 핵심 내용만 요약해주세요:
+
+HS코드: {result['hs_code']}
+해설서 원문:
+{result['manual_content']}
+
+요약 시 포함할 내용:
+- 주요 품목 범위
+- 포함/제외 품목  
+- 분류 기준
+- 핵심 특징
+
+간결하고 정확하게 요약해주세요."""
+            
+            try:
+                summary_response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=summary_prompt
+                )
+                result['manual_summary'] = clean_text(summary_response.text)
+                logger.log_actual("SUCCESS", f"HS코드 {result['hs_code']} 해설서 요약 완료", f"{len(result['manual_summary'])} chars")
+            except Exception as e:
+                logger.log_actual("ERROR", f"HS코드 {result['hs_code']} 요약 실패: {str(e)}")
+                result['manual_summary'] = result['manual_content'][:1000] + "..." if len(result['manual_content']) > 1000 else result['manual_content']
+        else:
+            result['manual_summary'] = ""
+    
+    summary_time = time.time() - summary_start
+    logger.log_actual("SUCCESS", f"Manual content summarization completed", f"{summary_time:.2f}s")
+
+    # 2단계: 해설서 요약 완료 후 업데이트된 정보 표시
+    if ui_container:
+        with analysis_container:
+            st.success("✅ **해설서 내용 요약 완료**")
+            st.markdown("### 📚 **해설서 요약 결과**")
+            
+            for i, result in enumerate(search_results, 1):
+                confidence_color = "🟢" if result['confidence'] == 'HIGH' else "🟡"
+                st.markdown(f"{confidence_color} **후보 {i}: HS코드 {result['hs_code']}** (신뢰도: {result['confidence']})")
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.write(f"**최종점수**: {result['final_score']:.3f}")
+                    st.write(f"**검색경로**: {', '.join(result['sources'])}")
+                with col2:
+                    if result['tariff_name']:
+                        st.write(f"**관세율표 품목명**: {result['tariff_name']}")
+                    if result.get('manual_summary'):
+                        st.write(f"**📖 해설서 요약**:")
+                        st.text(result['manual_summary'][:300] + "...")
+                    elif result['manual_content']:
+                        st.write(f"**📖 해설서**: 요약 실패 (원문 사용)")
+                
+                st.divider()
+        
+        progress_bar.progress(0.9, text="AI 전문가 분석 준비 중...")
+    
+    # HS 해설서 분석 결과를 세션 상태에 저장 (채팅 기록에서 보기 위해)
+    if ui_container:
+        import streamlit as st
+        if 'hs_manual_analysis_results' not in st.session_state:
+            st.session_state.hs_manual_analysis_results = []
+        
+        # 현재 분석 결과 저장
+        current_analysis = {
+            'timestamp': time.time(),
+            'search_results': search_results,
+            'query': user_input
+        }
+        st.session_state.hs_manual_analysis_results.append(current_analysis)
+        
+        # 최대 5개까지만 보관 (메모리 절약)
+        if len(st.session_state.hs_manual_analysis_results) > 5:
+            st.session_state.hs_manual_analysis_results.pop(0)
+    
     logger.log_actual("INFO", f"Enhanced context prepared", f"{len(enhanced_context)} chars")
     
+    # HS 해설서 분석 전용 컨텍스트
+    manual_context = """당신은 HS 해설서 및 관세율표 전문 분석가입니다.
+
+역할과 목표:
+- 관세율표(품목번호, 한글품명, 영문품명)와 HS 해설서의 병렬 분석
+- 관세율표 기반 유사도 검색과 해설서 텍스트 분석의 통합
+- 부(部)-류(類)-호(號) 체계와 관세율표 품목명의 정합성 판단
+
+병렬 검색 시스템:
+- **관세율표 검색**: hstable.json의 품목명 유사도 매칭 (40% 가중치)
+- **해설서 검색**: HS 해설서 본문 텍스트 분석 (60% 가중치)
+- **통합 분석**: 두 검색 결과의 교차 검증과 신뢰도 평가
+
+답변 구성요소:
+1. **최적 HS코드 추천**: 병렬 검색 결과 기반 최고 신뢰도 코드
+2. **관세율표 매칭**: 유사 품목명과 매칭도 분석
+3. **해설서 근거**: 해당 부-류-호 해설서의 정확한 적용
+4. **신뢰도 평가**: HIGH(양쪽 검색 일치) vs MEDIUM(한쪽만 매칭)
+5. **종합 판단**: 관세율표와 해설서 분석의 일치성 검토
+
+관세율표 품목명과 HS 해설서를 모두 활용하여 정확한 분류를 제시해주세요."""
+
     # Gemini에 전달할 프롬프트 구성
-    prompt = f"""{context}
+    prompt = f"""{manual_context}
 
 [병렬 검색 결과]
 {enhanced_context}
@@ -693,6 +1163,12 @@ def handle_hs_manual_with_parallel_search(user_input, context, hs_manager, logge
     logger.log_actual("SUCCESS", "Gemini processing completed", 
                      f"{ai_processing_time:.2f}s, input: {len(prompt)} chars, output: {len(final_answer)} chars")
     
+    # UI 최종 완료 표시
+    if ui_container:
+        progress_bar.progress(1.0, text="분석 완료!")
+        st.success("🧠 **AI 전문가 분석이 완료되었습니다**")
+        st.info("📋 **패널을 접고 아래에서 최종 답변을 확인하세요**")
+    
     return final_answer
 
 # 질문 유형 분류 함수 (LLM 기반)
@@ -730,8 +1206,9 @@ def classify_question(user_input):
 
 # 질문 유형별 처리 함수
 def handle_web_search(user_input, context, hs_manager):
-    # 웹검색 전용 컨텍스트로 수정
+    # 웹검색 전용 컨텍스트
     web_context = """당신은 HS 품목분류 전문가입니다. 
+
 사용자의 질문에 대해 최신 웹 정보를 검색하여 물품개요, 용도, 기술개발, 무역동향, 산업동향 등의 정보를 제공해주세요.
 국내 HS 분류 사례가 아닌 일반적인 시장 정보와 동향을 중심으로 답변해주세요."""
     
@@ -747,21 +1224,96 @@ def handle_web_search(user_input, context, hs_manager):
     
     return clean_text(response.text)
 
-def handle_hs_classification_cases(user_input, context, hs_manager):
+def handle_hs_classification_cases(user_input, context, hs_manager, ui_container=None):
     """국내 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
-    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
-    group_answers = []
-    for i in range(5):  # 3 → 5로 변경
+    import streamlit as st
+    from datetime import datetime
+    
+    # 국내 HS 분류사례 전용 컨텍스트
+    domestic_context = """당신은 국내 관세청의 HS 품목분류 전문가입니다. 
+
+역할과 목표:
+- 관세청 HS 분류사례, 위원회 결정, 협의회 결정을 바탕으로 정확한 HS코드 분류 제시
+- 국내 관세법과 HS 통칙에 근거한 전문적 분석 수행
+- 기존 분류 사례와의 일관성 유지
+
+답변 구성요소:
+1. **추천 HS코드**: 가장 적합한 HS코드와 근거
+2. **분류 논리**: 관세청 사례 기반 상세 분석
+3. **통칙 적용**: 해당되는 HS 통칙과 적용 근거
+4. **유사 사례**: 기존 분류 사례와의 비교
+5. **주의사항**: 분류 시 고려해야 할 요소들
+
+국내 관세청의 일관된 분류 기준을 우선시하여 답변해주세요."""
+    
+    # UI 컨테이너가 제공된 경우 실시간 표시
+    if ui_container:
+        with ui_container:
+            st.info("🔍 **국내 HS 분류사례 분석 시작**")
+            progress_bar = st.progress(0, text="AI 그룹별 분석 진행 중...")
+            responses_container = st.container()
+    
+    # 병렬 처리용 함수
+    def process_single_group(i):
         relevant = hs_manager.get_domestic_context_group(user_input, i)
-        prompt = f"{context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        prompt = f"{domestic_context}\n\n관련 데이터 (국내 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        
+        start_time = datetime.now()
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
-        group_answers.append(clean_text(response.text))
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        
+        answer = clean_text(response.text)
+        return i, answer, start_time, processing_time
+    
+    # 5개 그룹 병렬 처리 (max_workers=3)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    if ui_container:
+        progress_bar.progress(0, text="병렬 AI 분석 시작...")
+    
+    results = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(process_single_group, i) for i in range(5)]
+        
+        for future in as_completed(futures):
+            group_id, answer, start_time, processing_time = future.result()
+            results[group_id] = answer
+            
+            # session_state에 결과 저장
+            if ui_container:
+                analysis_result = {
+                    'type': 'domestic',
+                    'group_id': group_id,
+                    'answer': answer,
+                    'start_time': start_time.strftime('%H:%M:%S'),
+                    'processing_time': processing_time
+                }
+                st.session_state.ai_analysis_results.append(analysis_result)
+                
+                # 실시간 UI 업데이트 (완료된 순서대로)
+                with responses_container:
+                    st.success(f"🤖 **그룹 {group_id+1} AI 분석 완료** ({processing_time:.1f}초)")
+                    with st.container():
+                        st.write(f"⏰ {start_time.strftime('%H:%M:%S')}")
+                        st.markdown(f"**분석 결과:**")
+                        st.info(answer)
+                        st.divider()
+                
+                progress_bar.progress(len(results)/5, text=f"완료: {len(results)}/5 그룹")
+    
+    # 순서대로 정렬
+    group_answers = [results[i] for i in range(5)]
+
+    if ui_container:
+        progress_bar.progress(1.0, text="Head AI 최종 분석 중...")
+        st.info("🧠 **Head AI가 모든 분석을 종합하는 중...**")
 
     # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
-    head_prompt = f"{context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
+    head_prompt = f"{domestic_context}\n\n아래는 국내 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
     for idx, ans in enumerate(group_answers):
         head_prompt += f"[그룹{idx+1} 답변]\n{ans}\n\n"
     head_prompt += f"\n사용자: {user_input}\n"
@@ -769,23 +1321,102 @@ def handle_hs_classification_cases(user_input, context, hs_manager):
         model="gemini-2.5-flash",
         contents=head_prompt
     )
+    
+    if ui_container:
+        progress_bar.progress(1.0, text="분석 완료!")
+        st.success("✅ **모든 AI 분석이 완료되었습니다**")
+        st.info("📋 **패널을 접고 아래에서 최종 답변을 확인하세요**")
+    
     return clean_text(head_response.text)
 
 
-def handle_overseas_hs(user_input, context, hs_manager):
+def handle_overseas_hs(user_input, context, hs_manager, ui_container=None):
     """해외 HS 분류 사례 처리 (그룹별 Gemini + Head Agent)"""
-    overseas_context = context + "\n(해외 HS 분류 사례 분석 모드)"
+    import streamlit as st
+    from datetime import datetime
     
-    # 5개 그룹별로 각각 Gemini에 부분 답변 요청
-    group_answers = []
-    for i in range(5):
+    # 해외 HS 분류사례 전용 컨텍스트
+    overseas_context = """당신은 국제 HS 품목분류 전문가입니다.
+
+역할과 목표:
+- 미국 관세청(CBP)과 EU 관세청의 HS 분류 사례 분석
+- 국제 HS 분류 동향과 국내 분류와의 차이점 분석
+- WCO(세계관세기구) 기준과의 정합성 검토
+
+답변 구성요소:
+1. **해외 분류 현황**: 미국/EU의 해당 품목 분류 현황
+2. **국제 비교**: 각국 분류 기준의 차이점과 공통점
+3. **국내 적용 가능성**: 해외 사례의 국내 도입 가능성
+4. **WTO/WCO 동향**: 국제기구의 관련 논의사항
+5. **무역실무 고려사항**: 수출입 시 주의할 분류 차이
+
+글로벌 무역 관점에서 포괄적으로 분석해주세요."""
+    
+    # UI 컨테이너가 제공된 경우 실시간 표시
+    if ui_container:
+        with ui_container:
+            st.info("🌍 **해외 HS 분류사례 분석 시작**")
+            progress_bar = st.progress(0, text="AI 그룹별 분석 진행 중...")
+            responses_container = st.container()
+    
+    # 병렬 처리용 함수
+    def process_single_group(i):
         relevant = hs_manager.get_overseas_context_group(user_input, i)
         prompt = f"{overseas_context}\n\n관련 데이터 (해외 관세청, 그룹{i+1}):\n{relevant}\n\n사용자: {user_input}\n"
+        
+        start_time = datetime.now()
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
-        group_answers.append(clean_text(response.text))
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        
+        answer = clean_text(response.text)
+        return i, answer, start_time, processing_time
+    
+    # 5개 그룹 병렬 처리 (max_workers=3)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    if ui_container:
+        progress_bar.progress(0, text="병렬 AI 분석 시작...")
+    
+    results = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(process_single_group, i) for i in range(5)]
+        
+        for future in as_completed(futures):
+            group_id, answer, start_time, processing_time = future.result()
+            results[group_id] = answer
+            
+            # session_state에 결과 저장
+            if ui_container:
+                analysis_result = {
+                    'type': 'overseas',
+                    'group_id': group_id,
+                    'answer': answer,
+                    'start_time': start_time.strftime('%H:%M:%S'),
+                    'processing_time': processing_time
+                }
+                st.session_state.ai_analysis_results.append(analysis_result)
+                
+                # 실시간 UI 업데이트 (완료된 순서대로)
+                with responses_container:
+                    st.success(f"🌐 **그룹 {group_id+1} AI 분석 완료** ({processing_time:.1f}초)")
+                    with st.container():
+                        st.write(f"⏰ {start_time.strftime('%H:%M:%S')}")
+                        st.markdown(f"**분석 결과:**")
+                        st.info(answer)
+                        st.divider()
+                
+                progress_bar.progress(len(results)/5, text=f"완료: {len(results)}/5 그룹")
+    
+    # 순서대로 정렬
+    group_answers = [results[i] for i in range(5)]
+
+    if ui_container:
+        progress_bar.progress(1.0, text="Head AI 최종 분석 중...")
+        st.info("🧠 **Head AI가 모든 분석을 종합하는 중...**")
 
     # Head Agent가 5개 부분 답변을 취합하여 최종 답변 생성
     head_prompt = f"{overseas_context}\n\n아래는 해외 HS 분류 사례 데이터 5개 그룹별 분석 결과입니다. 각 그룹의 답변을 종합하여 최종 전문가 답변을 작성하세요.\n\n"
@@ -796,4 +1427,10 @@ def handle_overseas_hs(user_input, context, hs_manager):
         model="gemini-2.5-flash",
         contents=head_prompt
     )
+    
+    if ui_container:
+        progress_bar.progress(1.0, text="분석 완료!")
+        st.success("✅ **모든 AI 분석이 완료되었습니다**")
+        st.info("📋 **패널을 접고 아래에서 최종 답변을 확인하세요**")
+    
     return clean_text(head_response.text)
